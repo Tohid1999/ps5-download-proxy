@@ -1,0 +1,5 @@
+node_modules/
+data/mappings.json
+data/downloads.json
+.DS_Store
+*.part
