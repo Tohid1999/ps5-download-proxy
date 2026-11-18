@@ -1552,8 +1552,8 @@ function dashboardHtml() {
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th, td { text-align:left; border-bottom:1px solid #30363d; padding:9px; vertical-align:top; }
   th { position:sticky; top:0; background:#161b22; z-index:1; }
-  .urlcell { min-width:390px; max-width:720px; }
-  .pathcell { min-width:320px; max-width:600px; }
+  .urlcell { min-width:220px; max-width:720px; }
+  .pathcell { min-width:220px; max-width:600px; }
   .notice { border-left:3px solid #d29922; padding:8px 12px; background:#1b1a14; color:#c9d1d9; }
   .links-list { max-height:520px; overflow:auto; }
   .link-item { display:flex; gap:8px; align-items:flex-start; border-bottom:1px solid #30363d; padding:10px 0; }
@@ -1563,127 +1563,180 @@ function dashboardHtml() {
   .req-row.selected td { background:#1f2a3a; }
   .marker-row td { background:#2a2212; color:#e3b341; font-weight:600; }
   pre.detail { background:#0d1117; border:1px solid #30363d; border-radius:10px; padding:12px; overflow:auto; max-height:520px; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .top { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; flex-wrap:wrap; }
+  .top > div:first-child { flex:1 1 380px; }
+  .lead { margin:0; font-size:16px; max-width:720px; }
+  .top-status { border:1px solid #30363d; border-radius:12px; padding:10px 14px; background:#161b22; font-weight:600; white-space:nowrap; }
+  .tab { display:inline-flex; align-items:center; gap:8px; }
+  .tab .num { display:inline-grid; place-items:center; width:22px; height:22px; border-radius:50%; background:#30363d; font-size:12px; font-weight:700; }
+  .tab.active .num { background:#e6edf3; color:#1f6feb; }
+  .tab-advanced { margin-left:auto; color:#8b949e; }
+  .tab-advanced.active { color:#fff; }
+  .badge { background:#238636; color:#fff; border-radius:999px; padding:1px 8px; font-size:12px; font-weight:700; }
+  .addr { display:grid; grid-template-columns:auto 1fr; gap:6px 16px; align-items:center; }
+  .addr .label { color:#8b949e; font-size:14px; font-weight:500; }
+  .addr .value { font-size:26px; font-weight:750; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; color:#79c0ff; }
+  .howto { margin-top:12px; }
+  .howto summary { cursor:pointer; color:#58a6ff; font-weight:600; }
+  .howto li, .steps li { margin:6px 0; line-height:1.45; }
+  .small { font-size:13px; }
+  a { color:#58a6ff; }
+  .legend { display:flex; gap:18px; flex-wrap:wrap; font-size:13px; color:#9da7b3; margin-bottom:10px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .dot-remote { background:#8b949e; } .dot-local { background:#7ee787; } .dot-fallback { background:#d29922; }
+  .empty { text-align:center; padding:28px 12px; color:#8b949e; }
+  .next { margin-top:14px; padding:10px 12px; border-left:3px solid #2ea043; background:#12261a; }
+  .big-state { font-size:15px; margin-bottom:10px; }
+  td button { white-space:nowrap; }
+  #logRows td:first-child { white-space:nowrap; }
 </style>
 </head>
 <body>
 <main>
-  <h1>PS5 Download Proxy</h1>
-  <p>Capture PKG links, enumerate sequential PKG URLs, and automatically serve downloaded PKGs back to the PS5 by filename.</p>
+  <header class="top">
+    <div>
+      <h1>PS5 Download Proxy</h1>
+      <p class="lead">Download PS5 games faster on your computer, then let your PS5 install them from there instead of the internet.</p>
+    </div>
+    <div id="topStatus" class="top-status">Loading…</div>
+  </header>
 
-  <div class="tabs">
-    <button class="tab active" data-tab="overview">Overview</button>
-    <button class="tab" data-tab="links">PKG Download Links</button>
-    <button class="tab" data-tab="local">Local Mapping</button>
-    <button class="tab" data-tab="logger">Logger</button>
-    <button class="tab" data-tab="requests">PS5 Requests</button>
-  </div>
+  <nav class="tabs" aria-label="Steps">
+    <button class="tab active" data-tab="overview"><span class="num">1</span> Connect PS5</button>
+    <button class="tab" data-tab="logger"><span class="num">2</span> Find Game <span id="loggerBadge" class="badge" hidden></span></button>
+    <button class="tab" data-tab="links"><span class="num">3</span> Get Download Links <span id="linksBadge" class="badge" hidden></span></button>
+    <button class="tab" data-tab="local"><span class="num">4</span> Use My Files <span id="localBadge" class="badge" hidden></span></button>
+    <button class="tab tab-advanced" data-tab="requests">Advanced: Network Log</button>
+  </nav>
 
   <section id="panel-overview" class="panel active">
     <div class="grid">
       <div class="card">
-        <h2>Proxy</h2>
+        <h2>Step 1 · Point your PS5 at this computer</h2>
         <div id="proxyState">Loading…</div>
         <div id="proxyConfig"></div>
-        <div class="row">
-          <button id="startProxy" class="primary" onclick="proxyAction('start')">Start Proxy</button>
-          <button id="stopProxy" class="danger" onclick="proxyAction('stop')">Stop Proxy</button>
+        <details class="howto" open>
+          <summary>Where do I type this on the PS5?</summary>
+          <ol>
+            <li>On the PS5, open <strong>Settings → Network → Settings → Set Up Internet Connection</strong>.</li>
+            <li>Highlight your Wi-Fi or cable network, press the <strong>Options</strong> button, and choose <strong>Advanced Settings</strong>.</li>
+            <li>Set <strong>Proxy Server</strong> to <strong>Use</strong>, then enter the <strong>Address</strong> and <strong>Port</strong> shown above.</li>
+            <li>Choose <strong>OK</strong>. The PS5 and this computer must be on the same home network.</li>
+          </ol>
+          <p class="muted small">When you are finished, set Proxy Server back to <strong>Do Not Use</strong>, or the PS5 will lose internet when this app is closed.</p>
+        </details>
+        <div class="row" style="margin-top:14px">
+          <button id="startProxy" class="primary" onclick="proxyAction('start')">Turn On</button>
+          <button id="stopProxy" class="danger" onclick="proxyAction('stop')">Turn Off</button>
         </div>
         <div id="proxyMessage" class="muted" style="margin-top:9px"></div>
         <div class="switch-row">
           <label class="switch">
-            <input type="checkbox" id="internetToggle" checked disabled onchange="setInternetAccess(this.checked)" aria-label="PS5 internet access" />
+            <input type="checkbox" id="internetToggle" checked disabled onchange="setInternetAccess(this.checked)" aria-label="Let the PS5 use the internet" />
             <span class="slider"></span>
           </label>
           <div>
-            <div><strong>PS5 internet access:</strong> <span id="internetState" class="ok">Allowed</span></div>
-            <div id="internetHint" class="muted">Start the proxy to change this.</div>
+            <div><strong>Let the PS5 use the internet:</strong> <span id="internetState" class="ok">Yes</span></div>
+            <div id="internetHint" class="muted">Turn the proxy on to change this.</div>
           </div>
         </div>
       </div>
       <div class="card">
-        <h2>Workflow</h2>
-        <ol>
-          <li>Start the proxy and configure the PS5 with the shown <strong>Mac-IP:8080</strong>.</li>
-          <li>Start the PS5 game download.</li>
-          <li>The Logger captures the first <code>.pkg</code> URL.</li>
-          <li>Click <strong>Download Links</strong> to enumerate the sequential PKG URLs.</li>
-          <li>Download those URLs with your preferred download manager.</li>
-          <li>In Local Mapping, select the folder containing the unchanged PKG filenames.</li>
-          <li>Resume/restart the PS5 download. Matching files are served locally.</li>
+        <h2>How it works</h2>
+        <ol class="steps">
+          <li><strong>Connect.</strong> Set up the PS5 with the address on the left (Step 1).</li>
+          <li><strong>Start the download on the PS5</strong> like you normally would. It appears in <a href="#" data-goto="logger">Find Game</a>.</li>
+          <li><strong>Click “Get Download Links”</strong> next to the game. The app finds every part of the game.</li>
+          <li><strong>Copy the links</strong> into a download manager on your computer (for example Free Download Manager or JDownloader) and download them. <em>Don’t rename the files.</em></li>
+          <li><strong>Choose the folder</strong> with the downloaded files in <a href="#" data-goto="local">Use My Files</a>.</li>
+          <li><strong>Restart the download on the PS5.</strong> It now copies the files from your computer, which is much faster.</li>
         </ol>
+        <div class="notice">Safe by design: if a file is missing or not finished, the PS5 simply downloads that part from the internet as usual. Nothing breaks.</div>
       </div>
-    </div>
-  </section>
-
-  <section id="panel-links" class="panel">
-    <div class="card">
-      <div class="row">
-        <h2 class="grow">Sequential PKG Links</h2>
-        <button id="copyAll" onclick="copyAllLinks()" disabled>Copy All Links</button>
-      </div>
-      <p>The helper changes only the final numeric token immediately before <code>.pkg</code>. Everything else in the captured URL stays unchanged. It probes each next URL with a one-byte Range request and stops on the first HTTP error/non-2xx response.</p>
-      <div id="discoverySummary" class="muted">Click “Download Links” beside a captured PKG in Logger.</div>
-      <div id="discoveryLinks" class="links-list"></div>
-    </div>
-  </section>
-
-  <section id="panel-local" class="panel">
-    <div class="card">
-      <h2>Downloaded PKG Folders</h2>
-      <p>Add one or more directories containing the PKG files downloaded by your download manager. Filenames must remain unchanged. Subdirectories are scanned too.</p>
-      <div class="row">
-        <input id="localDirectory" class="grow" placeholder="/Users/you/Downloads/PS5Game" />
-        <button onclick="chooseDirectory()">Add Folder…</button>
-        <button onclick="setDirectory()">Add Path</button>
-        <button onclick="rescanDirectory()">Rescan All</button>
-        <button onclick="clearDirectory()">Disable Mapping</button>
-      </div>
-      <div id="localSummary" class="muted" style="margin-top:10px"></div>
-      <div class="scroll" style="margin-top:12px"><table>
-        <thead><tr><th>Folder</th><th>PKGs</th><th>State</th><th></th></tr></thead>
-        <tbody id="localFolders"></tbody>
-      </table></div>
-      <div class="notice" style="margin-top:14px">Fail-open behavior: if a requested PKG is missing, duplicated, unreadable, incomplete/size-mismatched, or its Range cannot be served locally, the original PS5 request is forwarded to the CDN normally.</div>
-    </div>
-    <div class="card">
-      <h2>Indexed Local PKGs</h2>
-      <div class="scroll"><table>
-        <thead><tr><th>Filename</th><th>Local path</th><th>Size</th><th>State</th></tr></thead>
-        <tbody id="localRows"></tbody>
-      </table></div>
     </div>
   </section>
 
   <section id="panel-logger" class="panel">
     <div class="card">
       <div class="row">
-        <h2 class="grow">PKG Logger</h2>
-        <button onclick="clearLogs()">Clear Logger</button>
+        <h2 class="grow">Step 2 · Game downloads seen from your PS5</h2>
+        <button onclick="clearLogs()">Clear List</button>
       </div>
-      <p><span class="ok">LOCAL</span> means the PKG was served from your selected directory. <span class="warn">FALLBACK</span> means local mapping could not safely handle it and the request was sent to the CDN. REMOTE means no local directory was enabled yet.</p>
+      <p>Start a game download on the PS5 and it shows up here within a few seconds. Then click <strong>Get Download Links</strong>.</p>
+      <div class="legend">
+        <span><span class="dot dot-remote"></span>From the internet</span>
+        <span><span class="dot dot-local"></span>From your computer</span>
+        <span><span class="dot dot-fallback"></span>From the internet, because your file couldn’t be used (reason shown)</span>
+      </div>
       <div class="scroll"><table>
-        <thead><tr><th>Time</th><th>Action</th><th>Status</th><th>PKG / URL</th><th>Range</th><th>Local mapping / reason</th><th></th></tr></thead>
+        <thead><tr><th>Time</th><th>Coming from</th><th>Game file</th><th>Details</th><th></th></tr></thead>
         <tbody id="logRows"></tbody>
+      </table></div>
+      <div id="logEmpty" class="empty">Nothing yet. Make sure Step 1 is done, then start a game download on the PS5.</div>
+    </div>
+  </section>
+
+  <section id="panel-links" class="panel">
+    <div class="card">
+      <div class="row">
+        <h2 class="grow">Step 3 · Download links for your game</h2>
+        <button id="copyAll" class="primary" onclick="copyAllLinks()" disabled>Copy All Links</button>
+      </div>
+      <p>Large games are split into several files. Copy all links, paste them into your download manager, and save them into one folder. <strong>Keep the original file names.</strong> Links expire after a while, so start downloading soon.</p>
+      <div id="discoverySummary" class="muted">Go to <a href="#" data-goto="logger">Find Game</a> and click “Get Download Links” next to a game.</div>
+      <div id="discoveryLinks" class="links-list"></div>
+      <div id="linksNext" class="next" hidden>Next: when the downloads finish, go to <a href="#" data-goto="local">Use My Files</a>.</div>
+    </div>
+  </section>
+
+  <section id="panel-local" class="panel">
+    <div class="card">
+      <h2>Step 4 · Tell the app where your downloaded files are</h2>
+      <p>Pick the folder where your download manager saved the game files. Folders inside it are checked too. You can add more than one folder, for example one per game or on another drive.</p>
+      <div class="row">
+        <button class="primary" onclick="chooseDirectory()">Choose Folder…</button>
+        <span class="muted">or paste a path:</span>
+        <input id="localDirectory" class="grow" placeholder="e.g. /Users/you/Downloads/MyGame  or  D:\\Games\\MyGame" />
+        <button onclick="setDirectory()">Add</button>
+      </div>
+      <div id="localSummary" class="muted" style="margin-top:10px"></div>
+      <div class="scroll" style="margin-top:12px"><table>
+        <thead><tr><th>Folder</th><th>Game files</th><th>Status</th><th></th></tr></thead>
+        <tbody id="localFolders"></tbody>
+      </table></div>
+      <div class="row" style="margin-top:12px">
+        <button onclick="rescanDirectory()" title="Use this after new files finish downloading">Check Folders Again</button>
+        <button onclick="clearDirectory()">Remove All Folders</button>
+      </div>
+      <div class="notice" style="margin-top:14px">Then restart the download on the PS5. Each file it finds here is sent from your computer. Any file that is missing, unfinished, or found twice is downloaded from the internet as usual.</div>
+    </div>
+    <div class="card">
+      <h2>Game files found</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>File name</th><th>Location</th><th>Size</th><th>Status</th></tr></thead>
+        <tbody id="localRows"></tbody>
       </table></div>
     </div>
   </section>
 
   <section id="panel-requests" class="panel">
+    <div class="notice" style="margin-top:18px">Advanced. You don’t need this tab to download games. It shows everything your PS5 sends over the network, for troubleshooting or research.</div>
     <div class="card">
       <div class="row">
-        <h2 class="grow">PS5 Requests</h2>
-        <input id="reqFilter" style="width:280px" placeholder="Filter by host, URL, IP, method, status…" />
-        <button class="danger" onclick="clearRequests()">Clean</button>
-        <button class="primary" onclick="exportRequests()">Export JSON</button>
+        <h2 class="grow">Network Log</h2>
+        <input id="reqFilter" style="width:280px" placeholder="Search by website, address, status…" />
+        <button class="danger" onclick="clearRequests()">Delete All</button>
+        <button onclick="exportRequests()">Save to File</button>
       </div>
       <div class="row" style="margin-top:10px">
-        <input id="markerNote" class="grow" placeholder="Marker note, e.g. “launching game X now” or “starting download”" />
-        <button onclick="addMarker()">Add Marker</button>
+        <input id="markerNote" class="grow" placeholder="Bookmark note, e.g. “opening game X now”" />
+        <button onclick="addMarker()">Add Bookmark</button>
       </div>
-      <p>Every request received by the proxy: plain HTTP requests (full headers and bodies) and HTTPS <code>CONNECT</code> tunnels (encrypted: only host, TLS server name, timing and traffic bursts are visible). Add a marker right before each action on the PS5 so the export shows which requests that action caused. Click a row for full details. Export includes all details, including unredacted URLs, headers and bodies.</p>
+      <p>Add a bookmark right before you do something on the PS5, so you can see which requests it caused. Click a row for full details. Secure (HTTPS) traffic stays encrypted: only the website name and timing are visible.</p>
+      <p class="warn small">⚠ The saved file contains private login tokens and cookies from your PSN account. Don’t share it publicly.</p>
       <div id="reqSummary" class="muted"></div>
       <div class="scroll" style="max-height:560px"><table>
-        <thead><tr><th>Time</th><th>Client</th><th>Type</th><th>Method</th><th>Status</th><th>Host / URL</th><th>Category</th><th>Route</th><th>↑ Sent</th><th>↓ Received</th><th>Duration</th></tr></thead>
+        <thead><tr><th>Time</th><th>Device</th><th>Type</th><th>Method</th><th>Status</th><th>Website / address</th><th>Category</th><th>Route</th><th>↑ Sent</th><th>↓ Received</th><th>Duration</th></tr></thead>
         <tbody id="reqRows"></tbody>
       </table></div>
     </div>
@@ -1703,6 +1756,12 @@ const fmtBytes = (n) => {
   return n.toFixed(i ? 2 : 0)+' '+units[i];
 };
 let latestDiscovery = null;
+const lastHtml = new Map();
+// Only touch the DOM when content changed, so open <details> and text selection survive the 1.5s refresh.
+function setHtml(id, html) {
+  if (lastHtml.get(id) === html) return false;
+  lastHtml.set(id, html); $(id).innerHTML = html; return true;
+}
 let currentLinks = [];
 let lastStatus = null;
 
@@ -1718,66 +1777,89 @@ function showTab(name) {
   document.querySelectorAll('.panel').forEach(x => x.classList.toggle('active', x.id === 'panel-'+name));
 }
 document.querySelectorAll('.tab').forEach(x => x.addEventListener('click', () => showTab(x.dataset.tab)));
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('[data-goto]');
+  if (link) { e.preventDefault(); showTab(link.dataset.goto); window.scrollTo(0, 0); }
+});
+
+// Turns technical error text into something a non-technical user can act on.
+function friendlyError(msg) {
+  const m = String(msg || '');
+  if (/EADDRINUSE/.test(m)) return 'Another app on this computer is already using this port. Close it (or another copy of this app) and click Turn On again.';
+  if (/EACCES|EPERM/.test(m)) return 'This computer did not allow the app to open the port. Try a port number above 1024.';
+  if (/ENOENT|no such file/i.test(m)) return 'That folder was not found. Check the path, or the drive may be unplugged.';
+  if (/ENOTDIR/.test(m)) return 'That path is a file, not a folder.';
+  if (/ETIMEDOUT|timed? ?out/i.test(m)) return 'The server took too long to answer. Check the internet connection and try again.';
+  if (/ENOTFOUND|EAI_AGAIN/.test(m)) return 'Could not reach the server. Check the internet connection.';
+  if (/ECONNREFUSED|ECONNRESET/.test(m)) return 'The connection was refused or dropped. Try again.';
+  return m;
+}
+const errHtml = (e) => '<span class="bad">'+esc(friendlyError(e?.message ?? e))+'</span>';
 
 async function proxyAction(action) {
-  $('proxyMessage').textContent = action === 'start' ? 'Starting…' : 'Stopping…';
+  $('proxyMessage').className='muted';
+  $('proxyMessage').textContent = action === 'start' ? 'Turning on…' : 'Turning off…';
   try {
     await api('/api/proxy/'+action, {method:'POST', body:'{}'});
-    $('proxyMessage').textContent = action === 'start' ? 'Proxy started.' : 'Proxy stopped.';
+    $('proxyMessage').textContent = action === 'start' ? 'On. Your PS5 can connect now.' : 'Off. If the PS5 still uses this proxy, it has no internet until you turn it on again.';
     await refresh();
   } catch(e) {
-    $('proxyMessage').className='bad'; $('proxyMessage').textContent=e.message;
+    $('proxyMessage').className='bad'; $('proxyMessage').textContent=friendlyError(e.message);
   }
 }
 
 async function startDiscovery(url) {
   showTab('links');
-  $('discoverySummary').textContent='Probing sequential PKG links…';
-  $('discoveryLinks').innerHTML='';
+  setHtml('discoverySummary', 'Looking for all parts of this game…');
+  setHtml('discoveryLinks', '');
   currentLinks=[];
   $('copyAll').disabled=true;
   try {
     latestDiscovery = await api('/api/pkg-discovery', {method:'POST', body:JSON.stringify({url})});
   } catch(e) {
-    $('discoverySummary').innerHTML='<span class="bad">'+esc(e.message)+'</span>';
+    setHtml('discoverySummary', errHtml(e));
   }
 }
 
 async function copyText(text) {
-  await navigator.clipboard.writeText(text);
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch { window.prompt('Copy these links (Ctrl+C / Cmd+C):', text); return false; }
 }
 
 async function copyAllLinks() {
   if (!currentLinks.length) return;
-  await copyText(currentLinks.map(x => x.url).join('\\n'));
-  $('copyAll').textContent='Copied!';
-  setTimeout(() => $('copyAll').textContent='Copy All Links', 1000);
+  if (await copyText(currentLinks.map(x => x.url).join('\\n'))) {
+    $('copyAll').textContent='Copied! Paste them into your download manager';
+    setTimeout(() => $('copyAll').textContent='Copy All Links', 2500);
+  }
 }
 
 async function chooseDirectory() {
-  $('localSummary').textContent='Opening folder chooser…';
+  $('localSummary').textContent='A folder picker window is opening. It may appear behind this browser.';
   try {
     await api('/api/local-directory/select', {method:'POST', body:'{}'});
     await refresh();
-  } catch(e) { $('localSummary').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; }
+  } catch(e) { $('localSummary').innerHTML=errHtml(e); }
 }
 
 async function setDirectory() {
+  if (!$('localDirectory').value.trim()) { $('localDirectory').focus(); return; }
   try {
-    await api('/api/local-directory', {method:'POST', body:JSON.stringify({directory:$('localDirectory').value})});
+    await api('/api/local-directory', {method:'POST', body:JSON.stringify({directory:$('localDirectory').value.trim()})});
     $('localDirectory').value='';
     await refresh();
-  } catch(e) { $('localSummary').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; }
+  } catch(e) { $('localSummary').innerHTML=errHtml(e); }
 }
 
 async function rescanDirectory() {
   try { await api('/api/local-directory/rescan', {method:'POST', body:'{}'}); await refresh(); }
-  catch(e) { $('localSummary').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; }
+  catch(e) { $('localSummary').innerHTML=errHtml(e); }
 }
 
 async function clearDirectory() {
   const count = (lastStatus?.local?.directories || []).length;
-  if (count > 1 && !confirm('Remove all '+count+' mapping folders?')) return;
+  if (!count) return;
+  if (!confirm('Remove '+(count > 1 ? 'all '+count+' folders' : 'this folder')+' from the app? Your files are NOT deleted.')) return;
   await api('/api/local-directory', {method:'DELETE'});
   $('localDirectory').value='';
   await refresh();
@@ -1787,8 +1869,9 @@ $('localFolders').addEventListener('click', async (e) => {
   const btn = e.target.closest('.remove-folder');
   if (!btn) return;
   try { await api('/api/local-directory?directory='+encodeURIComponent(btn.dataset.dir), {method:'DELETE'}); await refresh(); }
-  catch(err) { $('localSummary').innerHTML='<span class="bad">'+esc(err.message)+'</span>'; }
+  catch(err) { $('localSummary').innerHTML=errHtml(err); }
 });
+$('localDirectory').addEventListener('keydown', (e) => { if (e.key === 'Enter') setDirectory(); });
 
 let requestRows = [];
 let selectedRequestId = null;
@@ -1805,7 +1888,7 @@ async function addMarker() {
 $('markerNote').addEventListener('keydown', (e) => { if (e.key === 'Enter') addMarker(); });
 
 async function clearRequests() {
-  if (!confirm('Delete all captured PS5 requests?')) return;
+  if (!confirm('Delete the whole network log? This cannot be undone.')) return;
   await api('/api/requests', {method:'DELETE'});
   selectRequest(null);
   await refreshRequests();
@@ -1830,7 +1913,7 @@ async function selectRequest(reqId) {
 function renderRequests(data) {
   if (data) {
     requestRows = data.rows || [];
-    $('reqSummary').textContent = data.total+' request(s) captured'+(data.total > requestRows.length ? ' · showing latest '+requestRows.length : '');
+    $('reqSummary').textContent = data.total ? data.total+' request(s) recorded'+(data.total > requestRows.length ? ' · showing the latest '+requestRows.length : '') : 'Nothing recorded yet. Use the PS5 while it is connected through this app.';
   }
   const q = $('reqFilter').value.trim().toLowerCase();
   const rows = q ? requestRows.filter(r => [r.host, r.url, r.clientIp, r.method, r.status, r.type, r.route, r.category, r.sni, r.reason].join(' ').toLowerCase().includes(q)) : requestRows;
@@ -1862,31 +1945,64 @@ function renderDiscovery(jobs) {
   }
   const job=latestDiscovery;
   if (!job) {
-    $('discoverySummary').textContent='Click “Download Links” beside a captured PKG in Logger.';
-    $('discoveryLinks').innerHTML='';
+    setHtml('discoverySummary', 'Go to <a href="#" data-goto="logger">Find Game</a> and click “Get Download Links” next to a game.');
+    setHtml('discoveryLinks', '');
+    $('linksNext').hidden=true; $('linksBadge').hidden=true;
     currentLinks=[]; $('copyAll').disabled=true; return;
   }
   currentLinks=job.links || [];
   $('copyAll').disabled=!currentLinks.length;
-  const progress = job.status === 'running'
-    ? 'Scanning index '+job.currentIndex+' · found '+currentLinks.length+' valid link(s)…'
-    : 'Found '+currentLinks.length+' valid link(s). '+(job.stopReason || '');
-  $('discoverySummary').innerHTML='<div><strong>'+esc(job.status.toUpperCase())+'</strong> · '+esc(progress)+'</div><div class="muted" style="margin-top:5px">Captured: <code>'+esc(job.displayUrl)+'</code></div>';
-  $('discoveryLinks').innerHTML=currentLinks.map((x,i) => '<div class="link-item"><span class="pill">#'+esc(x.index)+'</span><code>'+esc(x.url)+'</code><button class="copy-one" data-i="'+i+'">Copy</button></div>').join('');
-  document.querySelectorAll('.copy-one').forEach(btn => btn.addEventListener('click', async () => {
-    await copyText(currentLinks[Number(btn.dataset.i)].url); btn.textContent='Copied!'; setTimeout(()=>btn.textContent='Copy',800);
-  }));
+  const n=currentLinks.length;
+  const totalBytes=currentLinks.reduce((sum,x) => sum+(x.totalSize||0), 0);
+  const parts=n+' file'+(n===1?'':'s')+(totalBytes ? ' · about '+fmtBytes(totalBytes)+' in total' : '');
+  let headline, cls;
+  if (job.status === 'running') { headline='Searching… found '+parts+' so far.'; cls='warn'; }
+  else if (job.status === 'error' || (!n && job.error)) { headline='Could not check the links: '+friendlyError(job.error || job.stopReason); cls='bad'; }
+  else if (!n) { headline='No game files were found at this link. It has probably expired. Start the download on the PS5 again, then click “Get Download Links” on the new entry.'; cls='bad'; }
+  else { headline='Done. Found '+(n > 1 ? 'all ' : '')+parts+'.'; cls='ok'; }
+  setHtml('discoverySummary', '<div class="big-state '+cls+'"><strong>'+esc(headline)+'</strong></div><details class="muted small"><summary>Technical details</summary>Original link: <code>'+esc(job.displayUrl)+'</code><br>'+esc(job.stopReason || '')+'</details>');
+  setHtml('discoveryLinks', currentLinks.map((x,i) => '<div class="link-item"><span class="pill">Part '+(i+1)+'</span><code>'+esc(x.url)+'</code>'+(x.totalSize?'<span class="muted small" style="white-space:nowrap">'+esc(fmtBytes(x.totalSize))+'</span>':'')+'<button class="copy-one" data-i="'+i+'">Copy</button></div>').join(''));
+  $('linksNext').hidden = job.status === 'running' || !n;
+  $('linksBadge').hidden = !n; $('linksBadge').textContent = n;
 }
 
+let currentLogs = [];
+$('discoveryLinks').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.copy-one');
+  if (!btn) return;
+  if (await copyText(currentLinks[Number(btn.dataset.i)].url)) { btn.textContent='Copied!'; setTimeout(()=>btn.textContent='Copy',1200); }
+});
+$('logRows').addEventListener('click', (e) => {
+  const btn = e.target.closest('.discover-btn');
+  if (btn && currentLogs[Number(btn.dataset.i)]) startDiscovery(currentLogs[Number(btn.dataset.i)].url);
+});
+// Plain-language version of the server's fallback reasons; the original is kept as a tooltip.
+function friendlyReason(r) {
+  r = String(r || '');
+  if (/^Local file not found/.test(r)) return 'You don’t have this file in your folders yet.';
+  if (/^Duplicate local filename/.test(r)) return 'This file is in your folders more than once, so it wasn’t used. Keep only one copy.';
+  if (/size mismatch/.test(r)) return 'Your copy is unfinished or damaged (wrong size). Download it again.';
+  if (/is empty/.test(r)) return 'Your copy of this file is empty. Download it again.';
+  if (/not a regular file/.test(r)) return 'Something with this name exists, but it isn’t a normal file.';
+  if (/blocked from dashboard/.test(r)) return 'Blocked because internet access is turned off in Step 1.';
+  return r;
+}
+const SOURCE_LABEL = { LOCAL: 'Your computer', REMOTE: 'Internet', FALLBACK: 'Internet (file not used)' };
+const fmtTime = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString(); };
+
 function renderLogs(logs) {
-  $('logRows').innerHTML=logs.map((l,i) => {
-    const cls=l.action==='LOCAL'?'ok':l.action==='FALLBACK'?'warn':'';
-    const details=l.action==='LOCAL' ? '<code>'+esc(l.localFile)+'</code>' : (l.reason ? '<span class="warn">'+esc(l.reason)+'</span>' : '<span class="muted">Sony/CDN</span>');
-    const action=(l.action==='REMOTE' || l.action==='FALLBACK') && l.url ? '<button class="discover-btn" data-i="'+i+'">Download Links</button>' : '';
-    const status=l.status == null ? '…' : l.status;
-    return '<tr><td>'+esc((l.timestamp||'').replace('T',' ').replace('Z',''))+'</td><td class="'+cls+'"><strong>'+esc(l.action)+'</strong></td><td>'+esc(status)+'</td><td class="urlcell"><strong>'+esc(l.filename)+'</strong><br><code>'+esc(l.displayUrl||l.url)+'</code></td><td>'+esc(l.range||'')+'</td><td class="pathcell">'+details+'</td><td>'+action+'</td></tr>';
-  }).join('');
-  document.querySelectorAll('.discover-btn').forEach(btn => btn.addEventListener('click', () => startDiscovery(logs[Number(btn.dataset.i)].url)));
+  $('logEmpty').hidden = logs.length > 0;
+  $('loggerBadge').hidden = !logs.length; $('loggerBadge').textContent = logs.length;
+  setHtml('logRows', logs.map((l,i) => {
+    const cls=l.action==='LOCAL'?'ok':l.action==='FALLBACK'?'warn':'muted';
+    const details=l.action==='LOCAL'
+      ? '<span class="muted small">Sent from</span> <code>'+esc(l.localFile)+'</code>'
+      : l.reason ? '<span class="warn" title="'+esc(l.reason)+'">'+esc(friendlyReason(l.reason))+'</span>' : '<span class="muted">Downloading from PlayStation servers</span>';
+    const action=(l.action==='REMOTE' || l.action==='FALLBACK') && l.url ? '<button class="discover-btn primary" data-i="'+i+'">Get Download Links</button>' : '';
+    const tech='Server status: '+(l.status ?? 'waiting')+(l.range ? ' · Range: '+l.range : '');
+    return '<tr title="'+esc(tech)+'"><td>'+esc(fmtTime(l.timestamp))+'</td><td class="'+cls+'"><strong>'+esc(SOURCE_LABEL[l.action] || l.action)+'</strong></td><td class="urlcell"><strong>'+esc(l.filename)+'</strong><details class="small muted"><summary>Full link</summary><code>'+esc(l.displayUrl||l.url)+'</code></details></td><td class="pathcell">'+details+'</td><td>'+action+'</td></tr>';
+  }).join(''));
+  currentLogs = logs;
 }
 
 async function refresh() {
@@ -1896,20 +2012,38 @@ async function refresh() {
     ]);
     lastStatus=status;
     const running=status.proxy.running;
-    $('proxyState').innerHTML='<span class="pill '+(running?'ok':'bad')+'">'+(running?'RUNNING':'STOPPED')+'</span>'+(status.proxy.lastError?' <span class="bad">'+esc(status.proxy.lastError)+'</span>':'');
-    const rec=status.proxy.recommended || [];
-    $('proxyConfig').innerHTML=rec.length
-      ? rec.map(x => '<div class="big-config"><code>'+esc(x)+'</code></div>').join('')+'<div class="muted">Use one of these as the PS5 Proxy Server address/port.</div>'
-      : '<div class="big-config bad">No LAN IPv4 address detected</div>';
+    $('proxyState').innerHTML=(running
+      ? '<div class="big-state ok"><strong>● On</strong> and waiting for your PS5</div>'
+      : '<div class="big-state bad"><strong>● Off</strong>. Click <strong>Turn On</strong> below.</div>')
+      +(status.proxy.lastError?'<div class="bad small">'+esc(friendlyError(status.proxy.lastError))+'</div>':'');
+    // Home routers almost always hand out 192.168.x / 10.x / 172.16-31.x; VPN and bridge addresses go last.
+    const rank = (a) => /^192\\.168\\./.test(a) ? 0 : /^10\\./.test(a) ? 1 : /^172\\.(1[6-9]|2\\d|3[01])\\./.test(a) ? 2 : 3;
+    const ips=[...(status.lanAddresses || [])].sort((x, y) => rank(x.address) - rank(y.address));
+    $('proxyConfig').innerHTML=ips.length
+      ? '<div class="big-config addr"><span class="label">Address</span><span class="value">'+esc(ips[0].address)+'</span><span class="label">Port</span><span class="value">'+esc(status.proxy.port)+'</span></div>'
+        +(ips.length > 1 ? '<div class="muted small">If that address doesn’t work, try: '+ips.slice(1).map(x => '<code>'+esc(x.address)+'</code>').join(', ')+' (same port).</div>' : '')
+      : '<div class="big-config bad" style="font-size:16px">This computer isn’t connected to a network. Connect it to the same Wi-Fi or router as your PS5.</div>';
     $('startProxy').disabled=running; $('stopProxy').disabled=!running;
 
     const local=status.local || {};
     const folders = local.directories || [];
+    $('localBadge').hidden = !local.pkgCount; $('localBadge').textContent = local.pkgCount || '';
     $('localSummary').innerHTML=folders.length
-      ? '<span class="ok">Mapping enabled</span> · '+esc(folders.length)+' folder(s) · '+esc(local.pkgCount)+' PKG(s) indexed · '+esc(local.duplicateNames)+' duplicate filename(s)'+(local.error?' · <span class="bad">some folders could not be scanned</span>':'')
-      : '<span class="muted">No local directory selected. PKG requests will use the CDN normally.</span>';
-    $('localFolders').innerHTML=folders.map(f => '<tr><td class="pathcell"><code>'+esc(f.directory)+'</code></td><td>'+esc(f.pkgCount)+'</td><td class="'+(f.error?'bad':'ok')+'">'+(f.error?esc(f.error):'ready')+'</td><td><button class="remove-folder" data-dir="'+esc(f.directory)+'">Remove</button></td></tr>').join('');
-    $('localRows').innerHTML=localFiles.map(f => '<tr><td>'+esc(f.filename)+'</td><td><code>'+esc(f.file)+'</code></td><td>'+esc(fmtBytes(f.size))+'</td><td class="'+(f.duplicate?'warn':'ok')+'">'+(f.duplicate?'duplicate / fallback':'ready')+'</td></tr>').join('');
+      ? '<span class="ok">✓ '+esc(local.pkgCount)+' game file(s) ready</span> in '+esc(folders.length)+' folder(s)'
+        +(local.duplicateNames?' · <span class="warn">'+esc(local.duplicateNames)+' file name(s) found twice, which won’t be used</span>':'')
+        +(local.error?' · <span class="bad">some folders could not be read</span>':'')
+      : '<span class="muted">No folder chosen yet. Until you choose one, the PS5 downloads everything from the internet.</span>';
+    $('localFolders').innerHTML=folders.length ? folders.map(f => '<tr><td class="pathcell"><code>'+esc(f.directory)+'</code></td><td>'+esc(f.pkgCount)+'</td><td class="'+(f.error?'bad':f.pkgCount?'ok':'warn')+'">'+(f.error?esc(friendlyError(f.error)):f.pkgCount?'Ready':'No game files in here')+'</td><td><button class="remove-folder" data-dir="'+esc(f.directory)+'">Remove</button></td></tr>').join('')
+      : '<tr><td colspan="4" class="empty">No folders yet. Click “Choose Folder…”.</td></tr>';
+    $('localRows').innerHTML=localFiles.length ? localFiles.map(f => '<tr><td>'+esc(f.filename)+'</td><td><code>'+esc(f.file)+'</code></td><td>'+esc(fmtBytes(f.size))+'</td><td class="'+(f.duplicate?'warn':'ok')+'">'+(f.duplicate?'Found twice, not used':'Ready')+'</td></tr>').join('')
+      : '<tr><td colspan="4" class="empty">No game files found yet.</td></tr>';
+
+    const served = logs.filter(l => l.action === 'LOCAL').length;
+    $('topStatus').innerHTML = !running
+      ? '<span class="bad">● Proxy is off</span>'
+      : served ? '<span class="ok">● Sending files from your computer ('+served+')</span>'
+      : logs.length ? '<span class="ok">● PS5 connected</span>'
+      : '<span class="warn">● On, waiting for the PS5</span>';
 
     renderLogs(logs);
     renderDiscovery(discoveries);
@@ -1930,13 +2064,13 @@ function renderInternet(state) {
   const toggle = $('internetToggle');
   toggle.checked = state.allowed;
   toggle.disabled = !state.proxyRunning || internetBusy;
-  $('internetState').textContent = state.allowed ? 'Allowed' : 'Blocked';
+  $('internetState').textContent = state.allowed ? 'Yes' : 'No, blocked';
   $('internetState').className = state.allowed ? 'ok' : 'bad';
   $('internetHint').textContent = !state.proxyRunning
-    ? 'Start the proxy to change this.'
+    ? 'Turn the proxy on to change this.'
     : state.allowed
-      ? 'The PS5 can reach the internet through the proxy.'
-      : 'All internet requests from the PS5 are refused. PKGs mapped to your local folder are still served.';
+      ? 'Normal. Turn this off to keep the PS5 offline (for example, to stop updates).'
+      : 'The PS5 is offline. Game files from your folders are still sent. This switches back on when the app restarts.';
 }
 
 async function setInternetAccess(allowed) {
