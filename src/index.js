@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -15,12 +16,18 @@ const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT, 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const REQUESTS_FILE = path.join(DATA_DIR, 'requests.json');
+const REQUESTS_SAVE_INTERVAL_MS = 3000;
 
 const PROXY_HOST = process.env.PROXY_HOST || '0.0.0.0';
 const PROXY_PORT = Number(process.env.PROXY_PORT || 8080);
 const DASHBOARD_HOST = process.env.DASHBOARD_HOST || '127.0.0.1';
 const DASHBOARD_PORT = Number(process.env.DASHBOARD_PORT || 8081);
 const MAX_LOGS = Number(process.env.MAX_LOGS || 2000);
+const MAX_REQUEST_LOGS = Number(process.env.MAX_REQUEST_LOGS || 5000);
+const MAX_BODY_CAPTURE = Number(process.env.MAX_BODY_CAPTURE || 64 * 1024);
+const MAX_FLOW_EVENTS = 300;
+const FLOW_MERGE_MS = 50;
 const MAX_PACKAGE_LINKS = Number(process.env.MAX_PACKAGE_LINKS || 4096);
 const PKG_PROBE_TIMEOUT_MS = Number(process.env.PKG_PROBE_TIMEOUT_MS || 10000);
 const MAX_SCAN_ENTRIES = Number(process.env.MAX_SCAN_ENTRIES || 100000);
@@ -32,12 +39,37 @@ let settings = loadJson(SETTINGS_FILE, { localDirectory: null });
 let proxyRunning = false;
 let proxyLastError = null;
 let pkgLogs = [];
+let requestLogs = [];
+let proxyConnectionCounter = 0;
+// When false, the proxy refuses to reach the internet for the PS5. Locally mapped PKGs are still served.
+let internetAllowed = true;
+const activeUpstreams = new Map();
+
+// Remembers each open upstream connection with its PS5-side counterpart so blocking can cut both.
+function trackUpstream(conn, downstream) {
+  activeUpstreams.set(conn, downstream);
+  conn.on('close', () => activeUpstreams.delete(conn));
+}
+
+function setInternetAllowed(allowed) {
+  internetAllowed = allowed;
+  if (!allowed) {
+    for (const [conn, downstream] of activeUpstreams) {
+      conn.destroy();
+      downstream.destroy();
+    }
+    activeUpstreams.clear();
+  }
+  console.log(`[INTERNET] PS5 internet access ${allowed ? 'ALLOWED' : 'BLOCKED'}`);
+  return { allowed: internetAllowed };
+}
 const pkgDiscoveryJobs = new Map();
 const remoteMetadata = new Map();
 const proxySockets = new Set();
 let localPkgIndex = new Map();
 let localScan = {
   directory: settings.localDirectory || null,
+  directories: [],
   pkgCount: 0,
   duplicateNames: 0,
   scannedEntries: 0,
@@ -158,6 +190,263 @@ function addPkgLog(entry) {
   return log;
 }
 
+// Heuristic guess at what a PS5 request is for, based only on host and URL.
+const REQUEST_CATEGORIES = [
+  { test: (h) => /(^|\.)np\.dl\.playstation\.net$/.test(h), category: 'psn-platform-content', hint: 'PSN platform content (NP CDN)' },
+  { test: (h) => /(^|\.)np\.playstation\.net$/.test(h), category: 'psn-account', hint: 'PSN platform: sign-in, account, entitlement/licence candidate' },
+  { test: (h) => /(^|\.)rnps\.dl\.playstation\.net$/.test(h), category: 'system-ui', hint: 'System UI component check' },
+  { test: (h) => /update\.playstation\.net$/.test(h), category: 'system-update', hint: 'Firmware update check' },
+  { test: (h) => /^ena\.net\.playstation\.net$/.test(h), category: 'connectivity-test', hint: 'Internet connection test' },
+  { test: (h) => /telemetry|metrics|analytics/.test(h), category: 'telemetry', hint: 'Telemetry / analytics' },
+  { test: (h, u) => isPkgUrl(u || '') || /(^|\.)(gs2|gst)\.[a-z.]*dl\.playstation\.net$/.test(h), category: 'game-download', hint: 'Game/app package download' },
+  { test: (h) => /(^|\.)playstation\.(net|com)$/.test(h), category: 'playstation-other', hint: 'Other PlayStation service' }
+];
+
+function hostnameOnly(host) {
+  return String(host || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+}
+
+function classifyRequest(host, url) {
+  const h = hostnameOnly(host);
+  if (!h) return { category: null, categoryHint: null };
+  const match = REQUEST_CATEGORIES.find((c) => c.test(h, url));
+  return match ? { category: match.category, categoryHint: match.hint } : { category: 'other', categoryHint: 'Not a PlayStation domain' };
+}
+
+function addRequestLog(entry) {
+  const log = {
+    id: id(),
+    timestamp: now(),
+    type: 'HTTP',
+    method: null,
+    url: null,
+    host: null,
+    clientIp: null,
+    connectionId: null,
+    httpVersion: null,
+    requestHeaders: {},
+    route: null,
+    localFile: null,
+    reason: null,
+    status: null,
+    responseHeaders: null,
+    upstreamIp: null,
+    bytesUp: 0,
+    bytesDown: 0,
+    durationMs: null,
+    state: 'pending',
+    error: null,
+    ...entry
+  };
+  if (!('category' in entry)) Object.assign(log, classifyRequest(log.host, log.url));
+  requestLogs.unshift(log);
+  if (requestLogs.length > MAX_REQUEST_LOGS) requestLogs.length = MAX_REQUEST_LOGS;
+  markRequestLogsDirty();
+  return log;
+}
+
+// The PS5 request log is saved to disk so restarts (including `npm run dev` reloads) keep it.
+let requestLogsDirty = false;
+let requestLogsSaving = false;
+
+function markRequestLogsDirty() {
+  requestLogsDirty = true;
+}
+
+function loadRequestLogs() {
+  const saved = loadJson(REQUESTS_FILE, null);
+  if (!Array.isArray(saved?.requests)) return;
+  requestLogs = saved.requests.slice(0, MAX_REQUEST_LOGS).map((log) => (
+    log.state === 'pending' ? { ...log, state: 'interrupted', reason: log.reason || 'Helper restarted while this request was open' } : log
+  ));
+  console.log(`Loaded ${requestLogs.length} saved PS5 request(s)`);
+}
+
+async function saveRequestLogs() {
+  // Keep saving while requests are open, since their bytes and timing keep changing.
+  if (requestLogsSaving || !(requestLogsDirty || requestLogs.some((x) => x.state === 'pending'))) return;
+  requestLogsSaving = true;
+  requestLogsDirty = false;
+  try {
+    const tmp = `${REQUESTS_FILE}.tmp`;
+    await fs.promises.writeFile(tmp, JSON.stringify({ savedAt: now(), requests: requestLogs }));
+    await fs.promises.rename(tmp, REQUESTS_FILE);
+  } catch (error) {
+    requestLogsDirty = true;
+    console.error(`Could not save PS5 requests: ${error.message}`);
+  } finally {
+    requestLogsSaving = false;
+  }
+}
+
+function saveRequestLogsSync() {
+  try {
+    const tmp = `${REQUESTS_FILE}.sync.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ savedAt: now(), requests: requestLogs }));
+    fs.renameSync(tmp, REQUESTS_FILE);
+  } catch (error) {
+    console.error(`Could not save PS5 requests: ${error.message}`);
+  }
+}
+
+function requestLogSummary(log) {
+  const { requestHeaders, responseHeaders, requestBody, responseBody, flow, tls, ...summary } = log;
+  return summary;
+}
+
+// Groups consecutive same-direction tunnel chunks into bursts; each burst is roughly one TLS message/flight.
+function recordFlow(log, started, dir, bytes) {
+  const t = Date.now() - started;
+  const last = log.flow[log.flow.length - 1];
+  if (last && last.dir === dir && t - last.endMs <= FLOW_MERGE_MS) {
+    last.bytes += bytes;
+    last.chunks++;
+    last.endMs = t;
+    return;
+  }
+  if (log.flow.length >= MAX_FLOW_EVENTS) {
+    log.flowTruncated = true;
+    return;
+  }
+  log.flow.push({ atMs: t, endMs: t, dir, bytes, chunks: 1 });
+}
+
+function summarizeFlow(log) {
+  const flow = log.flow || [];
+  let roundTrips = 0;
+  for (let i = 0; i < flow.length - 1; i++) {
+    if (flow[i].dir === 'up' && flow[i + 1].dir === 'down') roundTrips++;
+  }
+  const firstDown = flow.find((x) => x.dir === 'down');
+  log.roundTrips = roundTrips;
+  log.firstResponseMs = firstDown ? firstDown.atMs : null;
+}
+
+// Reads SNI and ALPN from a TLS ClientHello without decrypting anything.
+function parseClientHello(buf) {
+  try {
+    if (buf.length < 6 || buf[0] !== 0x16 || buf[5] !== 0x01) return null;
+    let p = 9 + 2 + 32;
+    p += 1 + buf[p];
+    p += 2 + buf.readUInt16BE(p);
+    p += 1 + buf[p];
+    const extEnd = Math.min(buf.length, p + 2 + buf.readUInt16BE(p));
+    p += 2;
+    const out = { recordVersion: `0x${buf.readUInt16BE(1).toString(16)}`, sni: null, alpn: [] };
+    while (p + 4 <= extEnd) {
+      const type = buf.readUInt16BE(p);
+      const len = buf.readUInt16BE(p + 2);
+      const ext = buf.subarray(p + 4, p + 4 + len);
+      p += 4 + len;
+      if (type === 0 && ext.length > 5) {
+        out.sni = ext.subarray(5, 5 + ext.readUInt16BE(3)).toString('ascii');
+      } else if (type === 16 && ext.length > 2) {
+        for (let q = 2; q < ext.length; q += 1 + ext[q]) out.alpn.push(ext.subarray(q + 1, q + 1 + ext[q]).toString('ascii'));
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function headerValue(headers, name) {
+  if (!headers) return null;
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === name);
+  return key ? headers[key] : null;
+}
+
+function decodeBody(chunks, totalBytes, headers) {
+  if (!chunks.length) return null;
+  let buf = Buffer.concat(chunks);
+  const truncated = totalBytes > buf.length;
+  const encoding = String(headerValue(headers, 'content-encoding') || '').toLowerCase();
+  const opts = { finishFlush: zlib.constants.Z_SYNC_FLUSH };
+  try {
+    if (encoding === 'gzip') buf = zlib.gunzipSync(buf, opts);
+    else if (encoding === 'deflate') buf = zlib.inflateSync(buf, opts);
+    else if (encoding === 'br') buf = zlib.brotliDecompressSync(buf);
+  } catch {}
+  const text = buf.toString('utf8');
+  const printable = !text.includes('\uFFFD') && !/[\x00-\x08\x0E-\x1F]/.test(text);
+  return {
+    capturedBytes: chunks.reduce((n, c) => n + c.length, 0),
+    totalBytes,
+    truncated,
+    contentEncoding: encoding || null,
+    format: printable ? 'text' : 'base64',
+    data: printable ? text : buf.toString('base64')
+  };
+}
+
+// Records status, headers, byte counts and timing of a proxied HTTP response.
+function trackHttpExchange(req, res, log) {
+  const started = Date.now();
+  const captureResponse = !isPkgUrl(log.url || '');
+  const requestChunks = [];
+  const responseChunks = [];
+  let requestCaptured = 0;
+  let responseCaptured = 0;
+  req.on('data', (chunk) => {
+    log.bytesUp += chunk.length;
+    if (requestCaptured < MAX_BODY_CAPTURE) {
+      const part = chunk.subarray(0, MAX_BODY_CAPTURE - requestCaptured);
+      requestChunks.push(part);
+      requestCaptured += part.length;
+    }
+  });
+
+  const writeHead = res.writeHead;
+  res.writeHead = function (status, ...args) {
+    log.status = status;
+    const headers = args.find((x) => x && typeof x === 'object');
+    log.responseHeaders = { ...res.getHeaders(), ...(headers || {}) };
+    return writeHead.call(this, status, ...args);
+  };
+  const countChunk = (chunk, encoding) => {
+    if (chunk == null || typeof chunk === 'function') return;
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8');
+    log.bytesDown += buf.length;
+    if (captureResponse && responseCaptured < MAX_BODY_CAPTURE) {
+      const part = buf.subarray(0, MAX_BODY_CAPTURE - responseCaptured);
+      responseChunks.push(Buffer.from(part));
+      responseCaptured += part.length;
+    }
+  };
+  const captureBodies = () => {
+    log.requestBody = decodeBody(requestChunks, log.bytesUp, log.requestHeaders);
+    log.responseBody = captureResponse
+      ? decodeBody(responseChunks, log.bytesDown, log.responseHeaders)
+      : { skipped: 'PKG payload not captured' };
+  };
+  const write = res.write;
+  res.write = function (chunk, encoding, ...rest) {
+    countChunk(chunk, encoding);
+    return write.call(this, chunk, encoding, ...rest);
+  };
+  const end = res.end;
+  res.end = function (chunk, encoding, ...rest) {
+    countChunk(chunk, encoding);
+    return end.call(this, chunk, encoding, ...rest);
+  };
+
+  res.on('finish', () => {
+    log.state = 'complete';
+    log.durationMs = Date.now() - started;
+    captureBodies();
+    markRequestLogsDirty();
+  });
+  res.on('close', () => {
+    if (log.state === 'pending') {
+      log.state = 'aborted';
+      log.durationMs = Date.now() - started;
+      captureBodies();
+    }
+    if (log.status == null) log.status = res.statusCode;
+    markRequestLogsDirty();
+  });
+}
+
 function findPkgNumberSlot(rawUrl) {
   const match = /(\d+)(?=\.pkg(?:[?#]|$))/i.exec(rawUrl);
   if (!match) return null;
@@ -201,10 +490,21 @@ function rememberRemoteMetadata(rawUrl, headers, statusCode) {
   remoteMetadata.set(rawUrl, meta);
 }
 
-function scanLocalDirectory(directory) {
-  const index = new Map();
-  let pkgCount = 0;
-  let duplicateNames = 0;
+// Mapping folders. `localDirectory` (first folder) is kept in settings for older versions.
+function localDirectories() {
+  if (Array.isArray(settings.localDirectories)) return settings.localDirectories;
+  return settings.localDirectory ? [settings.localDirectory] : [];
+}
+
+function saveLocalDirectories(directories) {
+  settings.localDirectories = directories;
+  settings.localDirectory = directories[0] || null;
+  saveSettings();
+}
+
+// Walks one folder and returns its .pkg files; throws if the folder cannot be scanned.
+function findPkgFiles(directory) {
+  const files = [];
   let scannedEntries = 0;
 
   const stat = fs.statSync(directory);
@@ -225,43 +525,78 @@ function scanLocalDirectory(directory) {
         continue;
       }
       if (!entry.isFile() || !/\.pkg$/i.test(entry.name)) continue;
-      pkgCount++;
-      const existing = index.get(entry.name) || [];
-      existing.push(full);
-      index.set(entry.name, existing);
+      files.push({ name: entry.name, full });
+    }
+  }
+  return { files, scannedEntries };
+}
+
+// Indexes every mapping folder. A folder that fails to scan is reported but does not stop the others.
+function scanLocalDirectories() {
+  const directories = localDirectories();
+  const index = new Map();
+  const seenFiles = new Set();
+  const folders = [];
+  let scannedEntries = 0;
+
+  for (const directory of directories) {
+    try {
+      const result = findPkgFiles(directory);
+      scannedEntries += result.scannedEntries;
+      for (const file of result.files) {
+        // Overlapping folders (e.g. a folder and its parent) must not turn one file into a "duplicate".
+        let real = file.full;
+        try { real = fs.realpathSync(file.full); } catch {}
+        if (seenFiles.has(real)) continue;
+        seenFiles.add(real);
+        const existing = index.get(file.name) || [];
+        existing.push(file.full);
+        index.set(file.name, existing);
+      }
+      folders.push({ directory, pkgCount: result.files.length, scannedEntries: result.scannedEntries, error: null });
+    } catch (error) {
+      folders.push({ directory, pkgCount: 0, scannedEntries: 0, error: error.message });
     }
   }
 
+  let duplicateNames = 0;
   for (const files of index.values()) {
     if (files.length > 1) duplicateNames++;
   }
+  const errors = folders.filter((f) => f.error).map((f) => `${f.directory}: ${f.error}`);
 
   localPkgIndex = index;
   localScan = {
-    directory,
-    pkgCount,
+    directory: directories[0] || null,
+    directories: folders,
+    pkgCount: seenFiles.size,
     duplicateNames,
     scannedEntries,
     scannedAt: now(),
-    error: null
+    error: errors.length ? errors.join('; ') : null
   };
   return localScan;
 }
 
-function setLocalDirectory(directory) {
+function addLocalDirectory(directory) {
   const resolved = path.resolve(String(directory));
-  const result = scanLocalDirectory(resolved);
-  settings.localDirectory = resolved;
-  saveSettings();
-  return result;
+  findPkgFiles(resolved); // validate before saving, so a bad path is never stored
+  const directories = localDirectories();
+  if (!directories.includes(resolved)) saveLocalDirectories([...directories, resolved]);
+  return scanLocalDirectories();
+}
+
+function removeLocalDirectory(directory) {
+  saveLocalDirectories(localDirectories().filter((d) => d !== directory));
+  return scanLocalDirectories();
 }
 
 function clearLocalDirectory() {
-  settings.localDirectory = null;
-  saveSettings();
+  saveLocalDirectories([]);
   localPkgIndex = new Map();
   localScan = {
     directory: null,
+    directories: [],
     pkgCount: 0,
     duplicateNames: 0,
     scannedEntries: 0,
@@ -271,7 +606,7 @@ function clearLocalDirectory() {
 }
 
 function resolveLocalPackage(rawUrl) {
-  if (!settings.localDirectory) return { file: null, reason: 'No local PKG directory configured' };
+  if (!localDirectories().length) return { file: null, reason: 'No local PKG directory configured' };
   const filename = pkgFilenameFromUrl(rawUrl);
   if (!filename) return { file: null, reason: 'Request is not a .pkg URL' };
   const matches = localPkgIndex.get(filename) || [];
@@ -417,6 +752,17 @@ function forwardHttp(req, res, rawUrl, semanticLog = null) {
     return;
   }
 
+  if (!internetAllowed) {
+    if (req.requestLog) Object.assign(req.requestLog, { route: 'BLOCKED', reason: 'Internet access blocked from dashboard' });
+    if (semanticLog) {
+      semanticLog.status = 403;
+      semanticLog.upstreamError = 'Internet access blocked from dashboard';
+    }
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Internet access is blocked by the PS5 download helper');
+    return;
+  }
+
   const transport = target.protocol === 'https:' ? https : http;
   const headers = stripProxyHeaders(req.headers);
   headers.host = target.host;
@@ -431,6 +777,7 @@ function forwardHttp(req, res, rawUrl, semanticLog = null) {
     timeout: 120_000
   }, (upstreamRes) => {
     rememberRemoteMetadata(rawUrl, upstreamRes.headers, upstreamRes.statusCode);
+    if (req.requestLog) req.requestLog.upstreamIp = upstreamRes.socket?.remoteAddress || null;
     if (semanticLog) {
       semanticLog.status = upstreamRes.statusCode || null;
       semanticLog.totalSize = totalSizeFromHeaders(upstreamRes.headers, upstreamRes.statusCode);
@@ -443,8 +790,10 @@ function forwardHttp(req, res, rawUrl, semanticLog = null) {
     upstreamRes.pipe(res);
   });
 
+  trackUpstream(upstream, res);
   upstream.on('timeout', () => upstream.destroy(new Error('Upstream timeout')));
   upstream.on('error', (error) => {
+    if (req.requestLog) req.requestLog.error = error.message;
     if (semanticLog) {
       semanticLog.status = 502;
       semanticLog.upstreamError = error.message;
@@ -461,9 +810,44 @@ function forwardHttp(req, res, rawUrl, semanticLog = null) {
   req.pipe(upstream);
 }
 
+// True when a URL points back at this proxy, e.g. a local app polling localhost:8080 directly.
+// Forwarding such a request would loop through the proxy until connections run out.
+function targetsProxyItself(rawUrl) {
+  let target;
+  try { target = new URL(rawUrl); } catch { return false; }
+  const port = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
+  if (port !== PROXY_PORT) return false;
+  const hostname = target.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const own = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0', os.hostname().toLowerCase()]);
+  for (const x of lanAddresses()) own.add(x.address);
+  return own.has(hostname) || hostname.endsWith('.localhost');
+}
+
 function handleProxyHttp(req, res) {
   const rawUrl = requestUrl(req);
+  if (rawUrl && targetsProxyItself(rawUrl)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('This is the PS5 download helper proxy. Configure it as an HTTP proxy instead of requesting it directly.');
+    return;
+  }
+  let host = req.headers.host || null;
+  try { if (rawUrl) host = new URL(rawUrl).host; } catch {}
+  const reqLog = addRequestLog({
+    type: 'HTTP',
+    method: req.method,
+    url: rawUrl || req.url,
+    host,
+    clientIp: clientIp(req.socket),
+    connectionId: req.socket.proxyConnectionId ?? null,
+    httpVersion: req.httpVersion,
+    requestHeaders: { ...req.headers },
+    route: 'PASSTHROUGH'
+  });
+  req.requestLog = reqLog;
+  trackHttpExchange(req, res, reqLog);
+
   if (!rawUrl) {
+    reqLog.reason = 'Missing Host header';
     res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Missing Host header');
     return;
@@ -490,11 +874,12 @@ function handleProxyHttp(req, res) {
     clientIp: clientIp(req.socket)
   };
 
-  if ((req.method === 'GET' || req.method === 'HEAD') && settings.localDirectory) {
+  if ((req.method === 'GET' || req.method === 'HEAD') && localDirectories().length) {
     const local = resolveLocalPackage(rawUrl);
     if (local.file) {
       const result = tryServeLocalFile(req, res, rawUrl, local.file);
       if (result.served) {
+        Object.assign(reqLog, { route: 'LOCAL', localFile: local.file });
         const log = addPkgLog({
           ...base,
           action: 'LOCAL',
@@ -506,6 +891,7 @@ function handleProxyHttp(req, res) {
         return;
       }
 
+      Object.assign(reqLog, { route: 'FALLBACK', localFile: local.file, reason: result.reason });
       const fallback = addPkgLog({
         ...base,
         action: 'FALLBACK',
@@ -517,6 +903,7 @@ function handleProxyHttp(req, res) {
       return;
     }
 
+    Object.assign(reqLog, { route: 'FALLBACK', reason: local.reason });
     const fallback = addPkgLog({
       ...base,
       action: 'FALLBACK',
@@ -527,6 +914,7 @@ function handleProxyHttp(req, res) {
     return;
   }
 
+  reqLog.route = 'REMOTE';
   const remote = addPkgLog({ ...base, action: 'REMOTE' });
   console.log(`[REMOTE] ${req.method} ${redactUrl(rawUrl)}`);
   forwardHttp(req, res, rawUrl, remote);
@@ -546,27 +934,89 @@ function parseConnectTarget(value) {
 
 const proxyServer = http.createServer(handleProxyHttp);
 proxyServer.on('connection', (socket) => {
+  socket.proxyConnectionId = ++proxyConnectionCounter;
   proxySockets.add(socket);
   socket.on('close', () => proxySockets.delete(socket));
 });
 proxyServer.on('connect', (req, clientSocket, head) => {
+  const started = Date.now();
   const target = parseConnectTarget(req.url);
+  const reqLog = addRequestLog({
+    type: 'CONNECT',
+    method: req.method,
+    url: req.url,
+    host: target ? `${target.host}:${target.port}` : req.url,
+    clientIp: clientIp(req.socket),
+    connectionId: req.socket.proxyConnectionId ?? null,
+    httpVersion: req.httpVersion,
+    requestHeaders: { ...req.headers },
+    route: 'TUNNEL',
+    bytesUp: head?.length || 0,
+    tls: null,
+    flow: []
+  });
+  let sawFirstClientBytes = false;
+  const inspectClientBytes = (chunk) => {
+    if (sawFirstClientBytes) return;
+    sawFirstClientBytes = true;
+    reqLog.tls = parseClientHello(chunk);
+    if (reqLog.tls?.sni) reqLog.sni = reqLog.tls.sni;
+  };
+  if (head?.length) {
+    inspectClientBytes(head);
+    recordFlow(reqLog, started, 'up', head.length);
+  }
+  const finishTunnel = () => {
+    if (reqLog.state !== 'pending') return;
+    reqLog.state = reqLog.error ? 'error' : 'complete';
+    reqLog.durationMs = Date.now() - started;
+    summarizeFlow(reqLog);
+    markRequestLogsDirty();
+  };
+  clientSocket.on('close', finishTunnel);
+
   if (!target) {
+    Object.assign(reqLog, { status: 400, reason: 'Invalid CONNECT target' });
     clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+    return;
+  }
+
+  if (!internetAllowed) {
+    Object.assign(reqLog, { status: 403, route: 'BLOCKED', reason: 'Internet access blocked from dashboard' });
+    finishTunnel();
+    // The PS5 may never close its side after a refusal, so close the socket once the 403 is flushed.
+    clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n', () => clientSocket.destroy());
     return;
   }
 
   console.log(`[TLS] CONNECT ${target.host}:${target.port}`);
   const upstreamSocket = net.connect(target.port, target.host, () => {
+    reqLog.status = 200;
     clientSocket.write('HTTP/1.1 200 Connection Established\r\nProxy-Agent: ps5-node-download-helper\r\n\r\n');
+    reqLog.upstreamIp = upstreamSocket.remoteAddress || null;
+    clientSocket.on('data', (chunk) => {
+      reqLog.bytesUp += chunk.length;
+      inspectClientBytes(chunk);
+      recordFlow(reqLog, started, 'up', chunk.length);
+    });
+    upstreamSocket.on('data', (chunk) => {
+      reqLog.bytesDown += chunk.length;
+      recordFlow(reqLog, started, 'down', chunk.length);
+    });
     if (head?.length) upstreamSocket.write(head);
     upstreamSocket.pipe(clientSocket);
     clientSocket.pipe(upstreamSocket);
   });
 
+  trackUpstream(upstreamSocket, clientSocket);
   upstreamSocket.setTimeout(120_000);
   upstreamSocket.on('timeout', () => upstreamSocket.destroy());
-  upstreamSocket.on('error', () => {
+  upstreamSocket.on('error', (error) => {
+    reqLog.error = error.message;
+    if (reqLog.status == null) {
+      reqLog.status = 502;
+      finishTunnel(); // never connected, so the PS5 may keep its side open; record the failure now
+    }
     if (!clientSocket.destroyed) clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
   });
   clientSocket.on('error', () => upstreamSocket.destroy());
@@ -748,6 +1198,101 @@ async function chooseDirectoryNative() {
   }
 }
 
+function fmtSize(n) {
+  if (n == null) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i ? 1 : 0)}${units[i]}`;
+}
+
+function buildRequestExport() {
+  const rows = [...requestLogs].reverse();
+  const t0 = rows.length ? Date.parse(rows[0].timestamp) : null;
+  const requests = rows.map((r, i) => ({ seq: i + 1, offsetMs: Date.parse(r.timestamp) - t0, ...r }));
+
+  const hosts = new Map();
+  const categories = {};
+  const clients = {};
+  for (const r of requests) {
+    if (r.type === 'MARKER') continue;
+    categories[r.category] = (categories[r.category] || 0) + 1;
+    const client = clients[r.clientIp] ||= { requests: 0, userAgents: [] };
+    client.requests++;
+    const ua = headerValue(r.requestHeaders, 'user-agent');
+    if (ua && !client.userAgents.includes(ua)) client.userAgents.push(ua);
+
+    const key = hostnameOnly(r.host);
+    const h = hosts.get(key) || {
+      host: key, category: r.category, categoryHint: r.categoryHint, sni: new Set(), alpn: new Set(),
+      upstreamIps: new Set(), requests: 0, tunnels: 0, httpRequests: 0, errors: 0,
+      bytesUp: 0, bytesDown: 0, firstSeen: r.timestamp, lastSeen: r.timestamp, offsetsSec: []
+    };
+    h.requests++;
+    if (r.type === 'CONNECT') h.tunnels++; else h.httpRequests++;
+    if (r.error) h.errors++;
+    h.bytesUp += r.bytesUp || 0;
+    h.bytesDown += r.bytesDown || 0;
+    h.lastSeen = r.timestamp;
+    h.offsetsSec.push(Number((r.offsetMs / 1000).toFixed(3)));
+    if (r.sni) h.sni.add(r.sni);
+    for (const a of r.tls?.alpn || []) h.alpn.add(a);
+    if (r.upstreamIp) h.upstreamIps.add(r.upstreamIp);
+    hosts.set(key, h);
+  }
+  const hostSummary = [...hosts.values()].map((h) => ({
+    ...h,
+    sni: [...h.sni],
+    alpn: [...h.alpn],
+    upstreamIps: [...h.upstreamIps],
+    gapsSec: h.offsetsSec.slice(1).map((x, i) => Number((x - h.offsetsSec[i]).toFixed(3)))
+  })).sort((a, b) => b.requests - a.requests);
+
+  const timeline = requests.map((r) => {
+    const t = `+${(r.offsetMs / 1000).toFixed(3)}s`.padEnd(11);
+    if (r.type === 'MARKER') return `${t} ===== MARKER: ${r.reason} =====`;
+    const target = r.type === 'HTTP' ? `${r.method} ${r.url}` : `CONNECT ${r.host}`;
+    const extra = [
+      `status=${r.status ?? '-'}`,
+      `up=${fmtSize(r.bytesUp)}`,
+      `down=${fmtSize(r.bytesDown)}`,
+      r.durationMs != null ? `dur=${r.durationMs}ms` : `state=${r.state}`,
+      r.roundTrips != null ? `roundTrips=${r.roundTrips}` : null,
+      r.error ? `error=${r.error}` : null
+    ].filter(Boolean).join(' ');
+    return `${t} #${r.seq} [${r.category}] ${target} ${extra}`;
+  });
+
+  return {
+    formatVersion: 2,
+    exportedAt: now(),
+    captureStart: rows[0]?.timestamp || null,
+    captureEnd: rows.at(-1)?.timestamp || null,
+    count: requests.length,
+    fieldGuide: {
+      offsetMs: 'Milliseconds since the first request in this export',
+      bytesUp: 'Bytes sent from the PS5 towards the server',
+      bytesDown: 'Bytes sent from the server to the PS5',
+      category: 'Heuristic guess from hostname/URL only; not proof of what the request does',
+      connectionId: 'PS5-to-proxy TCP connection; HTTP requests with the same id reused one connection',
+      sni: 'Server name the PS5 put in its TLS ClientHello (HTTPS tunnels only)',
+      'tls.alpn': 'Protocols the PS5 offered (h2 = HTTP/2: many requests may share one tunnel)',
+      flow: 'HTTPS tunnels: bursts of encrypted traffic. dir up = PS5->server, down = server->PS5. atMs/endMs are relative to tunnel start. The first 2-3 bursts are the TLS handshake; each later up->down pair is roughly one request/response',
+      roundTrips: 'Number of up->down turns in the tunnel, including the TLS handshake',
+      firstResponseMs: 'Time until the server first sent data back',
+      requestBody: 'Plain-HTTP request body (first MAX_BODY_CAPTURE bytes, decompressed when possible)',
+      responseBody: 'Plain-HTTP response body (first MAX_BODY_CAPTURE bytes, decompressed when possible); PKG payloads are skipped',
+      MARKER: 'Rows of type MARKER are notes added from the dashboard to mark what you were doing on the PS5'
+    },
+    limitations: 'HTTPS tunnel contents are encrypted end-to-end between the PS5 and Sony. Only hostnames, timing and sizes are visible for them.',
+    clients,
+    categories,
+    hosts: hostSummary,
+    timeline,
+    requests
+  };
+}
+
 function json(res, status, value) {
   const body = JSON.stringify(value, null, 2);
   res.writeHead(status, {
@@ -826,6 +1371,17 @@ const dashboardServer = http.createServer(async (req, res) => {
       }
     }
 
+    if (req.method === 'GET' && u.pathname === '/api/internet') {
+      return json(res, 200, { allowed: internetAllowed, proxyRunning });
+    }
+
+    if (req.method === 'POST' && u.pathname === '/api/internet') {
+      const body = await readJson(req);
+      if (typeof body.allowed !== 'boolean') return json(res, 400, { error: 'allowed must be true or false' });
+      if (!proxyRunning) return json(res, 409, { error: 'Start the proxy before changing internet access' });
+      return json(res, 200, { ...setInternetAllowed(body.allowed), proxyRunning });
+    }
+
     if (req.method === 'POST' && u.pathname === '/api/proxy/stop') {
       return json(res, 200, await stopProxy());
     }
@@ -837,6 +1393,47 @@ const dashboardServer = http.createServer(async (req, res) => {
 
     if (req.method === 'DELETE' && u.pathname === '/api/pkg-logs') {
       pkgLogs = [];
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && u.pathname === '/api/requests') {
+      const limit = Math.min(Number(u.searchParams.get('limit') || 500), MAX_REQUEST_LOGS);
+      return json(res, 200, { total: requestLogs.length, rows: requestLogs.slice(0, limit).map(requestLogSummary) });
+    }
+
+    if (req.method === 'POST' && u.pathname === '/api/requests/marker') {
+      const body = await readJson(req);
+      const note = String(body.note || '').trim().slice(0, 500);
+      if (!note) return json(res, 400, { error: 'note is required' });
+      const marker = addRequestLog({
+        type: 'MARKER', method: null, host: null, url: null, route: 'MARKER', reason: note,
+        state: 'complete', requestHeaders: null, category: 'marker', categoryHint: null
+      });
+      return json(res, 201, marker);
+    }
+
+    if (req.method === 'GET' && u.pathname === '/api/requests/export') {
+      const body = JSON.stringify(buildRequestExport(), null, 2);
+      const stamp = now().replace(/[:.]/g, '-');
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': Buffer.byteLength(body),
+        'Content-Disposition': `attachment; filename="ps5-requests-${stamp}.json"`,
+        'Cache-Control': 'no-store'
+      });
+      return res.end(body);
+    }
+
+    if (req.method === 'GET' && u.pathname.startsWith('/api/requests/')) {
+      const log = requestLogs.find((x) => x.id === u.pathname.slice('/api/requests/'.length));
+      if (!log) return json(res, 404, { error: 'Request not found' });
+      return json(res, 200, log);
+    }
+
+    if (req.method === 'DELETE' && u.pathname === '/api/requests') {
+      requestLogs = [];
+      saveRequestLogsSync();
+      markRequestLogsDirty(); // rewrite again in case an older background save lands after this one
       return json(res, 200, { ok: true });
     }
 
@@ -855,16 +1452,15 @@ const dashboardServer = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && u.pathname === '/api/local-directory') {
-      return json(res, 200, { ...localScan, directory: settings.localDirectory || null });
+      return json(res, 200, { ...localScan, directory: localDirectories()[0] || null });
     }
 
     if (req.method === 'POST' && u.pathname === '/api/local-directory') {
       const body = await readJson(req);
       if (!body.directory) return json(res, 400, { error: 'directory is required' });
       try {
-        return json(res, 200, setLocalDirectory(body.directory));
+        return json(res, 200, addLocalDirectory(body.directory));
       } catch (error) {
-        localScan.error = error.message;
         return json(res, 400, { error: error.message });
       }
     }
@@ -873,7 +1469,7 @@ const dashboardServer = http.createServer(async (req, res) => {
       try {
         const selected = await chooseDirectoryNative();
         if (!selected) return json(res, 400, { error: 'No directory selected' });
-        const scan = setLocalDirectory(selected);
+        const scan = addLocalDirectory(selected);
         return json(res, 200, scan);
       } catch (error) {
         return json(res, 400, { error: `Directory chooser failed or was cancelled: ${error.message}` });
@@ -881,16 +1477,13 @@ const dashboardServer = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && u.pathname === '/api/local-directory/rescan') {
-      if (!settings.localDirectory) return json(res, 400, { error: 'No local directory configured' });
-      try {
-        return json(res, 200, scanLocalDirectory(settings.localDirectory));
-      } catch (error) {
-        localScan.error = error.message;
-        return json(res, 400, { error: error.message });
-      }
+      if (!localDirectories().length) return json(res, 400, { error: 'No local directory configured' });
+      return json(res, 200, scanLocalDirectories());
     }
 
     if (req.method === 'DELETE' && u.pathname === '/api/local-directory') {
+      const directory = u.searchParams.get('directory');
+      if (directory) return json(res, 200, removeLocalDirectory(directory));
       clearLocalDirectory();
       return json(res, 200, { ok: true });
     }
@@ -931,6 +1524,15 @@ function dashboardHtml() {
   button.primary { background:#238636; border-color:#2ea043; }
   button.danger { background:#6e1a1a; border-color:#a33; }
   button:disabled { opacity:.45; cursor:not-allowed; }
+  .switch-row { display:flex; align-items:center; gap:12px; margin-top:16px; padding-top:14px; border-top:1px solid #30363d; }
+  .switch { position:relative; width:52px; height:28px; flex:none; }
+  .switch input { opacity:0; width:0; height:0; position:absolute; }
+  .switch .slider { position:absolute; inset:0; background:#6e1a1a; border:1px solid #a33; border-radius:999px; cursor:pointer; transition:background .15s; }
+  .switch .slider::before { content:""; position:absolute; width:20px; height:20px; left:3px; top:3px; background:#e6edf3; border-radius:50%; transition:transform .15s; }
+  .switch input:checked + .slider { background:#238636; border-color:#2ea043; }
+  .switch input:checked + .slider::before { transform:translateX(24px); }
+  .switch input:disabled + .slider { opacity:.45; cursor:not-allowed; }
+  .switch input:focus-visible + .slider { outline:2px solid #388bfd; outline-offset:2px; }
   input { width:100%; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:8px; padding:10px; }
   .tabs { display:flex; gap:8px; margin:24px 0 0; flex-wrap:wrap; }
   .tab.active { background:#1f6feb; border-color:#388bfd; }
@@ -956,6 +1558,11 @@ function dashboardHtml() {
   .links-list { max-height:520px; overflow:auto; }
   .link-item { display:flex; gap:8px; align-items:flex-start; border-bottom:1px solid #30363d; padding:10px 0; }
   .link-item code { flex:1; }
+  .req-row { cursor:pointer; }
+  .req-row:hover td { background:#1c2128; }
+  .req-row.selected td { background:#1f2a3a; }
+  .marker-row td { background:#2a2212; color:#e3b341; font-weight:600; }
+  pre.detail { background:#0d1117; border:1px solid #30363d; border-radius:10px; padding:12px; overflow:auto; max-height:520px; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
 </style>
 </head>
 <body>
@@ -968,6 +1575,7 @@ function dashboardHtml() {
     <button class="tab" data-tab="links">PKG Download Links</button>
     <button class="tab" data-tab="local">Local Mapping</button>
     <button class="tab" data-tab="logger">Logger</button>
+    <button class="tab" data-tab="requests">PS5 Requests</button>
   </div>
 
   <section id="panel-overview" class="panel active">
@@ -981,6 +1589,16 @@ function dashboardHtml() {
           <button id="stopProxy" class="danger" onclick="proxyAction('stop')">Stop Proxy</button>
         </div>
         <div id="proxyMessage" class="muted" style="margin-top:9px"></div>
+        <div class="switch-row">
+          <label class="switch">
+            <input type="checkbox" id="internetToggle" checked disabled onchange="setInternetAccess(this.checked)" aria-label="PS5 internet access" />
+            <span class="slider"></span>
+          </label>
+          <div>
+            <div><strong>PS5 internet access:</strong> <span id="internetState" class="ok">Allowed</span></div>
+            <div id="internetHint" class="muted">Start the proxy to change this.</div>
+          </div>
+        </div>
       </div>
       <div class="card">
         <h2>Workflow</h2>
@@ -1011,16 +1629,20 @@ function dashboardHtml() {
 
   <section id="panel-local" class="panel">
     <div class="card">
-      <h2>Downloaded PKG Folder</h2>
-      <p>Select the directory containing the PKG files downloaded by your download manager. Filenames must remain unchanged. Subdirectories are scanned too.</p>
+      <h2>Downloaded PKG Folders</h2>
+      <p>Add one or more directories containing the PKG files downloaded by your download manager. Filenames must remain unchanged. Subdirectories are scanned too.</p>
       <div class="row">
         <input id="localDirectory" class="grow" placeholder="/Users/you/Downloads/PS5Game" />
-        <button onclick="chooseDirectory()">Choose Folder…</button>
-        <button onclick="setDirectory()">Use Path</button>
-        <button onclick="rescanDirectory()">Rescan Files</button>
+        <button onclick="chooseDirectory()">Add Folder…</button>
+        <button onclick="setDirectory()">Add Path</button>
+        <button onclick="rescanDirectory()">Rescan All</button>
         <button onclick="clearDirectory()">Disable Mapping</button>
       </div>
       <div id="localSummary" class="muted" style="margin-top:10px"></div>
+      <div class="scroll" style="margin-top:12px"><table>
+        <thead><tr><th>Folder</th><th>PKGs</th><th>State</th><th></th></tr></thead>
+        <tbody id="localFolders"></tbody>
+      </table></div>
       <div class="notice" style="margin-top:14px">Fail-open behavior: if a requested PKG is missing, duplicated, unreadable, incomplete/size-mismatched, or its Range cannot be served locally, the original PS5 request is forwarded to the CDN normally.</div>
     </div>
     <div class="card">
@@ -1043,6 +1665,31 @@ function dashboardHtml() {
         <thead><tr><th>Time</th><th>Action</th><th>Status</th><th>PKG / URL</th><th>Range</th><th>Local mapping / reason</th><th></th></tr></thead>
         <tbody id="logRows"></tbody>
       </table></div>
+    </div>
+  </section>
+
+  <section id="panel-requests" class="panel">
+    <div class="card">
+      <div class="row">
+        <h2 class="grow">PS5 Requests</h2>
+        <input id="reqFilter" style="width:280px" placeholder="Filter by host, URL, IP, method, status…" />
+        <button class="danger" onclick="clearRequests()">Clean</button>
+        <button class="primary" onclick="exportRequests()">Export JSON</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <input id="markerNote" class="grow" placeholder="Marker note, e.g. “launching game X now” or “starting download”" />
+        <button onclick="addMarker()">Add Marker</button>
+      </div>
+      <p>Every request received by the proxy: plain HTTP requests (full headers and bodies) and HTTPS <code>CONNECT</code> tunnels (encrypted: only host, TLS server name, timing and traffic bursts are visible). Add a marker right before each action on the PS5 so the export shows which requests that action caused. Click a row for full details. Export includes all details, including unredacted URLs, headers and bodies.</p>
+      <div id="reqSummary" class="muted"></div>
+      <div class="scroll" style="max-height:560px"><table>
+        <thead><tr><th>Time</th><th>Client</th><th>Type</th><th>Method</th><th>Status</th><th>Host / URL</th><th>Category</th><th>Route</th><th>↑ Sent</th><th>↓ Received</th><th>Duration</th></tr></thead>
+        <tbody id="reqRows"></tbody>
+      </table></div>
+    </div>
+    <div class="card" id="reqDetailCard" style="display:none">
+      <div class="row"><h2 class="grow">Request Details</h2><button onclick="selectRequest(null)">Close</button></div>
+      <pre class="detail" id="reqDetail"></pre>
     </div>
   </section>
 </main>
@@ -1110,8 +1757,7 @@ async function copyAllLinks() {
 async function chooseDirectory() {
   $('localSummary').textContent='Opening folder chooser…';
   try {
-    const result = await api('/api/local-directory/select', {method:'POST', body:'{}'});
-    $('localDirectory').value=result.directory || '';
+    await api('/api/local-directory/select', {method:'POST', body:'{}'});
     await refresh();
   } catch(e) { $('localSummary').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; }
 }
@@ -1119,6 +1765,7 @@ async function chooseDirectory() {
 async function setDirectory() {
   try {
     await api('/api/local-directory', {method:'POST', body:JSON.stringify({directory:$('localDirectory').value})});
+    $('localDirectory').value='';
     await refresh();
   } catch(e) { $('localSummary').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; }
 }
@@ -1129,10 +1776,77 @@ async function rescanDirectory() {
 }
 
 async function clearDirectory() {
+  const count = (lastStatus?.local?.directories || []).length;
+  if (count > 1 && !confirm('Remove all '+count+' mapping folders?')) return;
   await api('/api/local-directory', {method:'DELETE'});
   $('localDirectory').value='';
   await refresh();
 }
+
+$('localFolders').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.remove-folder');
+  if (!btn) return;
+  try { await api('/api/local-directory?directory='+encodeURIComponent(btn.dataset.dir), {method:'DELETE'}); await refresh(); }
+  catch(err) { $('localSummary').innerHTML='<span class="bad">'+esc(err.message)+'</span>'; }
+});
+
+let requestRows = [];
+let selectedRequestId = null;
+
+async function addMarker() {
+  const note = $('markerNote').value.trim();
+  if (!note) return $('markerNote').focus();
+  try {
+    await api('/api/requests/marker', {method:'POST', body:JSON.stringify({note})});
+    $('markerNote').value = '';
+    await refreshRequests();
+  } catch(e) { $('reqSummary').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; }
+}
+$('markerNote').addEventListener('keydown', (e) => { if (e.key === 'Enter') addMarker(); });
+
+async function clearRequests() {
+  if (!confirm('Delete all captured PS5 requests?')) return;
+  await api('/api/requests', {method:'DELETE'});
+  selectRequest(null);
+  await refreshRequests();
+}
+
+function exportRequests() {
+  const a = document.createElement('a');
+  a.href = '/api/requests/export';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+async function selectRequest(reqId) {
+  selectedRequestId = reqId;
+  $('reqDetailCard').style.display = reqId ? '' : 'none';
+  renderRequests();
+  if (!reqId) return;
+  $('reqDetail').textContent = 'Loading…';
+  try { $('reqDetail').textContent = JSON.stringify(await api('/api/requests/'+encodeURIComponent(reqId)), null, 2); }
+  catch(e) { $('reqDetail').textContent = e.message; }
+}
+
+function renderRequests(data) {
+  if (data) {
+    requestRows = data.rows || [];
+    $('reqSummary').textContent = data.total+' request(s) captured'+(data.total > requestRows.length ? ' · showing latest '+requestRows.length : '');
+  }
+  const q = $('reqFilter').value.trim().toLowerCase();
+  const rows = q ? requestRows.filter(r => [r.host, r.url, r.clientIp, r.method, r.status, r.type, r.route, r.category, r.sni, r.reason].join(' ').toLowerCase().includes(q)) : requestRows;
+  $('reqRows').innerHTML = rows.map(r => {
+    if (r.type === 'MARKER') return '<tr class="req-row marker-row'+(r.id===selectedRequestId?' selected':'')+'" data-id="'+esc(r.id)+'"><td>'+esc((r.timestamp||'').replace('T',' ').replace('Z',''))+'</td><td colspan="10">▶ MARKER: '+esc(r.reason)+'</td></tr>';
+    const statusCls = r.error || r.status >= 400 ? 'bad' : r.status >= 300 ? 'warn' : r.status ? 'ok' : 'muted';
+    const routeCls = r.route === 'LOCAL' ? 'ok' : r.route === 'FALLBACK' ? 'warn' : 'muted';
+    const status = r.error ? (r.status || 'ERR')+' · '+r.error : (r.status ?? '…');
+    return '<tr class="req-row'+(r.id===selectedRequestId?' selected':'')+'" data-id="'+esc(r.id)+'"><td>'+esc((r.timestamp||'').replace('T',' ').replace('Z',''))+'</td><td>'+esc(r.clientIp)+'</td><td>'+esc(r.type)+'</td><td>'+esc(r.method)+'</td><td class="'+statusCls+'">'+esc(status)+'</td><td class="urlcell"><strong>'+esc(r.host)+'</strong>'+(r.type==='HTTP'?'<br><code>'+esc(r.url)+'</code>':'')+'</td><td title="'+esc(r.categoryHint)+'">'+esc(r.category)+'</td><td class="'+routeCls+'">'+esc(r.route)+'</td><td>'+esc(fmtBytes(r.bytesUp))+'</td><td>'+esc(fmtBytes(r.bytesDown))+'</td><td>'+(r.durationMs==null?esc(r.state):esc(r.durationMs+' ms'))+'</td></tr>';
+  }).join('');
+}
+$('reqRows').addEventListener('click', (e) => {
+  const row = e.target.closest('.req-row');
+  if (row) selectRequest(row.dataset.id === selectedRequestId ? null : row.dataset.id);
+});
+$('reqFilter').addEventListener('input', () => renderRequests());
 
 async function clearLogs() {
   await api('/api/pkg-logs', {method:'DELETE'});
@@ -1190,10 +1904,11 @@ async function refresh() {
     $('startProxy').disabled=running; $('stopProxy').disabled=!running;
 
     const local=status.local || {};
-    if (local.directory && !$('localDirectory').value) $('localDirectory').value=local.directory;
-    $('localSummary').innerHTML=local.directory
-      ? '<span class="ok">Mapping enabled</span> · <code>'+esc(local.directory)+'</code> · '+esc(local.pkgCount)+' PKG(s) indexed · '+esc(local.duplicateNames)+' duplicate filename(s)'+(local.error?' · <span class="bad">'+esc(local.error)+'</span>':'')
+    const folders = local.directories || [];
+    $('localSummary').innerHTML=folders.length
+      ? '<span class="ok">Mapping enabled</span> · '+esc(folders.length)+' folder(s) · '+esc(local.pkgCount)+' PKG(s) indexed · '+esc(local.duplicateNames)+' duplicate filename(s)'+(local.error?' · <span class="bad">some folders could not be scanned</span>':'')
       : '<span class="muted">No local directory selected. PKG requests will use the CDN normally.</span>';
+    $('localFolders').innerHTML=folders.map(f => '<tr><td class="pathcell"><code>'+esc(f.directory)+'</code></td><td>'+esc(f.pkgCount)+'</td><td class="'+(f.error?'bad':'ok')+'">'+(f.error?esc(f.error):'ready')+'</td><td><button class="remove-folder" data-dir="'+esc(f.directory)+'">Remove</button></td></tr>').join('');
     $('localRows').innerHTML=localFiles.map(f => '<tr><td>'+esc(f.filename)+'</td><td><code>'+esc(f.file)+'</code></td><td>'+esc(fmtBytes(f.size))+'</td><td class="'+(f.duplicate?'warn':'ok')+'">'+(f.duplicate?'duplicate / fallback':'ready')+'</td></tr>').join('');
 
     renderLogs(logs);
@@ -1201,20 +1916,55 @@ async function refresh() {
   } catch(e) { console.error(e); }
 }
 
+// Polled separately so a failure here never affects the original tabs.
+async function refreshRequests() {
+  try { renderRequests(await api('/api/requests?limit=500')); }
+  catch(e) { $('reqSummary').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; }
+}
+
 refresh(); setInterval(refresh, 1500);
+refreshRequests(); setInterval(refreshRequests, 1500);
+
+let internetBusy = false;
+function renderInternet(state) {
+  const toggle = $('internetToggle');
+  toggle.checked = state.allowed;
+  toggle.disabled = !state.proxyRunning || internetBusy;
+  $('internetState').textContent = state.allowed ? 'Allowed' : 'Blocked';
+  $('internetState').className = state.allowed ? 'ok' : 'bad';
+  $('internetHint').textContent = !state.proxyRunning
+    ? 'Start the proxy to change this.'
+    : state.allowed
+      ? 'The PS5 can reach the internet through the proxy.'
+      : 'All internet requests from the PS5 are refused. PKGs mapped to your local folder are still served.';
+}
+
+async function setInternetAccess(allowed) {
+  internetBusy = true;
+  $('internetToggle').disabled = true;
+  try { renderInternet(await api('/api/internet', {method:'POST', body:JSON.stringify({allowed})})); }
+  catch(e) { $('internetHint').innerHTML = '<span class="bad">'+esc(e.message)+'</span>'; }
+  finally { internetBusy = false; await refreshInternet(); }
+}
+
+async function refreshInternet() {
+  if (internetBusy) return;
+  try { renderInternet(await api('/api/internet')); } catch(e) { console.error(e); }
+}
+refreshInternet(); setInterval(refreshInternet, 1500);
 </script>
 </body>
 </html>`;
 }
 
-if (settings.localDirectory) {
-  try {
-    scanLocalDirectory(settings.localDirectory);
-    console.log(`Indexed ${localScan.pkgCount} local PKG(s) from ${settings.localDirectory}`);
-  } catch (error) {
-    localScan.error = error.message;
-    console.warn(`Could not scan saved local directory: ${error.message}`);
-  }
+loadRequestLogs();
+setInterval(() => { void saveRequestLogs(); }, REQUESTS_SAVE_INTERVAL_MS).unref();
+process.on('exit', saveRequestLogsSync);
+
+if (localDirectories().length) {
+  scanLocalDirectories();
+  console.log(`Indexed ${localScan.pkgCount} local PKG(s) from ${localDirectories().length} folder(s)`);
+  if (localScan.error) console.warn(`Could not scan some local folders: ${localScan.error}`);
 }
 
 dashboardServer.listen(DASHBOARD_PORT, DASHBOARD_HOST, async () => {

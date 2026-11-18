@@ -56,6 +56,7 @@ The proxy starts automatically. You can stop/start it from the dashboard without
 - Start Proxy button
 - Stop Proxy button
 - Mac/PC LAN IP and proxy port shown as `IP:8080`
+- **PS5 internet access** switch (on by default). Turning it off refuses every request the PS5 makes to the internet: HTTP gets `403` and HTTPS tunnels are refused. It also cuts connections that are already open. PKGs mapped to your local folder are still served. The switch can only be changed while the proxy is running, and it resets to on when the helper restarts.
 
 ### PKG Download Links
 
@@ -74,11 +75,15 @@ There is a safety limit of 4096 discovered links by default.
 
 ### Local Mapping
 
-Choose the directory where your download manager saved the PKGs. The helper recursively scans subdirectories and indexes `.pkg` files by their unchanged filename.
+Add one or more directories where your download manager saved the PKGs, for example one folder per game or folders on different drives. The helper recursively scans subdirectories of every folder and indexes `.pkg` files by their unchanged filename.
 
-On macOS, **Choose Folder…** opens the native Finder folder chooser using `osascript`. A path can also be pasted manually.
+- **Add Folder…** opens the native folder chooser (Finder on macOS, `zenity`/`kdialog` on Linux). A path can also be pasted and added with **Add Path**.
+- Each folder is listed with its PKG count and state, and can be removed on its own with **Remove**.
+- **Rescan All** re-indexes every folder. **Disable Mapping** removes all folders.
+- A folder that cannot be scanned (for example an unplugged drive) is shown with its error. The other folders keep working.
+- Overlapping folders, such as a folder and its parent, do not count the same file twice.
 
-If the same PKG filename exists more than once under the selected directory, it is considered ambiguous and that request falls back to the CDN.
+If the same PKG filename exists more than once across the selected folders, it is considered ambiguous and that request falls back to the CDN.
 
 ### Logger
 
@@ -93,6 +98,29 @@ FALLBACK local mapping failed safely, so original request went to Sony/CDN
 For LOCAL rows it shows the exact local file used.
 
 For FALLBACK rows it shows the reason.
+
+### PS5 Requests
+
+Shows every request the proxy receives, not only PKG traffic:
+
+- plain HTTP requests: method, full URL, client IP, request and response headers, status, bytes sent/received, duration, and the route taken (`PASSTHROUGH`, `REMOTE`, `LOCAL`, `FALLBACK`)
+- HTTPS `CONNECT` tunnels: target host, status, bytes transferred, and duration. The encrypted content is not visible.
+
+Click a row to see its full details. **Clean** deletes all captured requests. **Export JSON** downloads every captured request with full details.
+
+Use **Add Marker** right before each action on the PS5, such as "launching game X". The marker appears in the list and in the export timeline, so you can see which requests that action caused.
+
+What is recorded:
+
+- plain HTTP: full headers, plus request and response bodies (first 64 KB, decompressed; PKG payloads are skipped), the upstream server IP, and which PS5 connection was reused
+- HTTPS tunnels: TLS server name (SNI) and protocols offered, read from the unencrypted ClientHello; upstream IP; bursts of traffic over time in each direction, plus round-trip count and time to first response. The content itself stays encrypted.
+- a heuristic `category` per request, such as `psn-account`, `system-ui`, `telemetry` or `game-download`, guessed from the hostname only
+
+The export (`formatVersion: 2`) contains a `fieldGuide`, a per-host summary with the gaps between connections, a readable `timeline`, and every request in chronological order.
+
+Exports are not redacted: they include tokens in URLs and cookies or authorization headers. Treat the file as sensitive.
+
+Requests are saved to `data/requests.json` every few seconds and on shutdown, so they survive restarts. Up to `MAX_REQUEST_LOGS` (default 5000) are kept. Requests still open during a restart are marked `interrupted`. **Clean** also empties the saved file. The Logger tab is unchanged and still kept in memory only.
 
 ## Fail-open mapping behavior
 
@@ -183,6 +211,8 @@ PROXY_PORT=8080
 DASHBOARD_HOST=127.0.0.1
 DASHBOARD_PORT=8081
 MAX_LOGS=2000
+MAX_REQUEST_LOGS=5000
+MAX_BODY_CAPTURE=65536
 MAX_PACKAGE_LINKS=4096
 PKG_PROBE_TIMEOUT_MS=10000
 MAX_SCAN_ENTRIES=100000
