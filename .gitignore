@@ -1,5 +1,27 @@
+# Dependencies
 node_modules/
-data/mappings.json
-data/downloads.json
-.DS_Store
+
+# Runtime data (settings, captured requests — may contain PSN tokens/cookies)
+data/
+
+# Downloads / partial files
+*.pkg
 *.part
+
+# Test artifacts (test-range.sh)
+.test/
+
+# Request exports (contain unredacted tokens)
+*-requests*.json
+ps5-requests*.json
+
+# Editor / agent / OS files
+.kilo/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
