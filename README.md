@@ -1,5 +1,7 @@
 # PS5 Download Proxy v2
 
+![Node.js >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen) ![Dependencies: none](https://img.shields.io/badge/dependencies-none-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-yellow)
+
 A dependency-free Node.js helper for this workflow:
 
 1. PS5 uses your Mac/PC as an HTTP proxy.
@@ -28,9 +30,14 @@ node --version
 ## Start
 
 ```bash
+git clone https://github.com/Tohid1999/ps5-download-proxy.git
 cd ps5-download-proxy
 npm start
 ```
+
+No `npm install` is needed: the helper uses only Node.js built-in modules.
+
+While editing the code, use `npm run dev` instead. It restarts the helper automatically whenever `src/` changes.
 
 Open:
 
@@ -224,6 +231,22 @@ Example:
 PROXY_PORT=8888 npm start
 ```
 
+## Testing
+
+`npm test` runs `test-range.sh` (macOS/Linux, needs `bash` and `curl`). It starts the helper on ports 18080/18081, maps a 10 MB dummy PKG, and checks that a proxied Range request returns `206 Partial Content` with exactly the requested bytes. Your `data/settings.json` is backed up and restored.
+
+```bash
+npm test
+```
+
+## Privacy
+
+Everything the helper stores lives in `data/` (git-ignored): `settings.json` holds your local folder paths and `requests.json` holds captured PS5 traffic, including PSN tokens and cookies. Never commit or share these files or exported request JSON.
+
 ## Notes
 
 This helper is for content you are authorized to download. It does not bypass PSN ownership/entitlement checks or install packages directly on the console.
+
+## License
+
+[MIT](LICENSE)

@@ -4,10 +4,23 @@
   "private": true,
   "type": "module",
   "description": "Cross-platform PS5 HTTP PKG capture, sequential-link discovery, and fail-open local-file proxy helper.",
+  "license": "MIT",
+  "author": "Tohid1999",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tohid1999/ps5-download-proxy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Tohid1999/ps5-download-proxy/issues"
+  },
+  "homepage": "https://github.com/Tohid1999/ps5-download-proxy#readme",
+  "keywords": ["ps5", "playstation", "proxy", "pkg", "download", "http-proxy", "range-requests"],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "bash test-range.sh"
   }
 }
