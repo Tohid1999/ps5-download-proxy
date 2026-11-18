@@ -1,5 +1,5 @@
 {
-  "name": "ps5-node-download-helper",
+  "name": "ps5-download-proxy",
   "version": "2.0.0",
   "private": true,
   "type": "module",

@@ -1,4 +1,4 @@
-# PS5 Node Download Helper v2
+# PS5 Download Proxy v2
 
 A dependency-free Node.js helper for this workflow:
 
@@ -28,7 +28,7 @@ node --version
 ## Start
 
 ```bash
-cd ps5-node-download-helper
+cd ps5-download-proxy
 npm start
 ```
 

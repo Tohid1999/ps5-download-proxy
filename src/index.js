@@ -992,7 +992,7 @@ proxyServer.on('connect', (req, clientSocket, head) => {
   console.log(`[TLS] CONNECT ${target.host}:${target.port}`);
   const upstreamSocket = net.connect(target.port, target.host, () => {
     reqLog.status = 200;
-    clientSocket.write('HTTP/1.1 200 Connection Established\r\nProxy-Agent: ps5-node-download-helper\r\n\r\n');
+    clientSocket.write('HTTP/1.1 200 Connection Established\r\nProxy-Agent: ps5-download-proxy\r\n\r\n');
     reqLog.upstreamIp = upstreamSocket.remoteAddress || null;
     clientSocket.on('data', (chunk) => {
       reqLog.bytesUp += chunk.length;
@@ -1508,7 +1508,7 @@ function dashboardHtml() {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>PS5 Node Download Helper</title>
+<title>PS5 Download Proxy</title>
 <style>
   :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   * { box-sizing: border-box; }
@@ -1567,7 +1567,7 @@ function dashboardHtml() {
 </head>
 <body>
 <main>
-  <h1>PS5 Node Download Helper</h1>
+  <h1>PS5 Download Proxy</h1>
   <p>Capture PKG links, enumerate sequential PKG URLs, and automatically serve downloaded PKGs back to the PS5 by filename.</p>
 
   <div class="tabs">
