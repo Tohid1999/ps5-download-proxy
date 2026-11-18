@@ -2,11 +2,27 @@
 
 ![Node.js >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen) ![Dependencies: none](https://img.shields.io/badge/dependencies-none-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-yellow)
 
+Download PS5 games faster on your computer, then let your PS5 install them from there instead of the internet.
+
+## How to use it (simple version)
+
+1. Start the app (see [Start](#start)) and open `http://127.0.0.1:8081` in your browser.
+2. **Step 1 · Connect PS5**: type the **Address** and **Port** shown into the PS5 under *Settings → Network → Settings → Set Up Internet Connection → (your network) → Options → Advanced Settings → Proxy Server*.
+3. **Step 2 · Find Game**: start the game download on the PS5. It appears in the list. Click **Get Download Links**.
+4. **Step 3 · Get Download Links**: click **Copy All Links**, paste them into a download manager, and download them. Keep the file names.
+5. **Step 4 · Use My Files**: click **Choose Folder…** and pick the folder with the downloaded files.
+6. Restart the download on the PS5. It now copies the files from your computer.
+7. When finished, set the PS5's Proxy Server back to **Do Not Use**.
+
+If a file is missing or incomplete, the PS5 just downloads that part from the internet as usual.
+
+## How it works (technical)
+
 A dependency-free Node.js helper for this workflow:
 
 1. PS5 uses your Mac/PC as an HTTP proxy.
 2. The helper logs real `.pkg` download requests.
-3. Click **Download Links** on a captured PKG.
+3. Click **Get Download Links** on a captured PKG.
 4. The helper keeps the captured URL exact and increments only the final numeric token immediately before `.pkg` (`..._0.pkg` → `..._1.pkg`, or `0.pkg` → `1.pkg`).
 5. It probes each generated URL with `Range: bytes=0-0` and stops at the first non-2xx/error.
 6. Copy one link or **Copy All Links** into your own download manager.
@@ -45,29 +61,41 @@ Open:
 http://127.0.0.1:8081
 ```
 
-The Overview tab shows the exact LAN proxy endpoint(s), for example:
+The **Connect PS5** tab shows the address and port to enter on the PS5, for example:
 
 ```text
-192.168.1.50:8080
+Address  192.168.1.50
+Port     8080
 ```
 
-Use that IP and port in the PS5 Proxy Server settings.
-
-The proxy starts automatically. You can stop/start it from the dashboard without shutting down the dashboard.
+The proxy starts automatically. You can turn it off and on from the dashboard without closing the dashboard.
 
 ## Dashboard tabs
 
-### Overview
+The status badge in the top-right corner shows whether the proxy is off, waiting for the PS5, connected, or sending files from your computer. The tab badges count captured games, found links, and local game files.
 
-- Proxy RUNNING/STOPPED state
-- Start Proxy button
-- Stop Proxy button
-- Mac/PC LAN IP and proxy port shown as `IP:8080`
-- **PS5 internet access** switch (on by default). Turning it off refuses every request the PS5 makes to the internet: HTTP gets `403` and HTTPS tunnels are refused. It also cuts connections that are already open. PKGs mapped to your local folder are still served. The switch can only be changed while the proxy is running, and it resets to on when the helper restarts.
+### 1 · Connect PS5
 
-### PKG Download Links
+- Proxy on/off state with **Turn On** / **Turn Off** buttons
+- The computer's network **Address** and **Port**. Home-network addresses (`192.168.x`, `10.x`, `172.16–31.x`) are listed first, and other addresses such as VPNs are shown as alternatives
+- Step-by-step PS5 proxy settings instructions
+- **Let the PS5 use the internet** switch (on by default). Turning it off refuses every request the PS5 makes to the internet: HTTP gets `403` and HTTPS tunnels are refused. It also cuts connections that are already open. PKGs mapped to your local folder are still served. The switch can only be changed while the proxy is running, and it resets to on when the helper restarts.
 
-After clicking **Download Links** in Logger, the helper:
+### 2 · Find Game
+
+Shows only PKG traffic. The **Coming from** column says where each file came from:
+
+```text
+Internet                   (REMOTE)   PS5 PKG request is using Sony/CDN
+Your computer              (LOCAL)    request was mapped to a local PKG
+Internet (file not used)   (FALLBACK) local mapping failed safely, so the request went to Sony/CDN
+```
+
+For local rows it shows the exact local file used. For fallback rows it shows the reason in plain language; hover for the original technical reason. Hover a row for the HTTP status and Range. **Get Download Links** starts link discovery for that PKG.
+
+### 3 · Get Download Links
+
+After you click **Get Download Links** in Find Game, the helper:
 
 - keeps the captured URL unchanged for the first probe
 - finds the final decimal number directly before `.pkg`
@@ -75,47 +103,33 @@ After clicking **Download Links** in Logger, the helper:
 - preserves every other URL character/query parameter
 - probes with a one-byte HTTP Range request
 - stops at the first failed/non-2xx URL
-- lists all valid links
+- lists all valid links as numbered parts, with sizes and the total size
 - provides Copy buttons and Copy All Links
 
-There is a safety limit of 4096 discovered links by default.
+If no links are found, the captured link has most likely expired; restart the download on the PS5 and try again. There is a safety limit of 4096 discovered links by default.
 
-### Local Mapping
+### 4 · Use My Files
 
 Add one or more directories where your download manager saved the PKGs, for example one folder per game or folders on different drives. The helper recursively scans subdirectories of every folder and indexes `.pkg` files by their unchanged filename.
 
-- **Add Folder…** opens the native folder chooser (Finder on macOS, `zenity`/`kdialog` on Linux). A path can also be pasted and added with **Add Path**.
-- Each folder is listed with its PKG count and state, and can be removed on its own with **Remove**.
-- **Rescan All** re-indexes every folder. **Disable Mapping** removes all folders.
+- **Choose Folder…** opens the native folder chooser (Finder on macOS, `zenity`/`kdialog` on Linux). A path can also be pasted and added with **Add** (or Enter).
+- Each folder is listed with its game file count and status, and can be removed on its own with **Remove**.
+- **Check Folders Again** re-indexes every folder (use it after new downloads finish). **Remove All Folders** removes all folders from the app; files on disk are never deleted.
 - A folder that cannot be scanned (for example an unplugged drive) is shown with its error. The other folders keep working.
 - Overlapping folders, such as a folder and its parent, do not count the same file twice.
 
 If the same PKG filename exists more than once across the selected folders, it is considered ambiguous and that request falls back to the CDN.
 
-### Logger
+### Advanced: Network Log
 
-Logger shows only PKG traffic:
-
-```text
-REMOTE   PS5 PKG request is using Sony/CDN
-LOCAL    request was mapped to a local PKG
-FALLBACK local mapping failed safely, so original request went to Sony/CDN
-```
-
-For LOCAL rows it shows the exact local file used.
-
-For FALLBACK rows it shows the reason.
-
-### PS5 Requests
-
-Shows every request the proxy receives, not only PKG traffic:
+Not needed for downloading games. Shows every request the proxy receives, not only PKG traffic:
 
 - plain HTTP requests: method, full URL, client IP, request and response headers, status, bytes sent/received, duration, and the route taken (`PASSTHROUGH`, `REMOTE`, `LOCAL`, `FALLBACK`)
 - HTTPS `CONNECT` tunnels: target host, status, bytes transferred, and duration. The encrypted content is not visible.
 
-Click a row to see its full details. **Clean** deletes all captured requests. **Export JSON** downloads every captured request with full details.
+Click a row to see its full details. **Delete All** deletes all captured requests. **Save to File** downloads every captured request with full details as JSON.
 
-Use **Add Marker** right before each action on the PS5, such as "launching game X". The marker appears in the list and in the export timeline, so you can see which requests that action caused.
+Use **Add Bookmark** right before each action on the PS5, such as "launching game X". The bookmark (a `MARKER` entry) appears in the list and in the export timeline, so you can see which requests that action caused.
 
 What is recorded:
 
@@ -127,7 +141,7 @@ The export (`formatVersion: 2`) contains a `fieldGuide`, a per-host summary with
 
 Exports are not redacted: they include tokens in URLs and cookies or authorization headers. Treat the file as sensitive.
 
-Requests are saved to `data/requests.json` every few seconds and on shutdown, so they survive restarts. Up to `MAX_REQUEST_LOGS` (default 5000) are kept. Requests still open during a restart are marked `interrupted`. **Clean** also empties the saved file. The Logger tab is unchanged and still kept in memory only.
+Requests are saved to `data/requests.json` every few seconds and on shutdown, so they survive restarts. Up to `MAX_REQUEST_LOGS` (default 5000) are kept. Requests still open during a restart are marked `interrupted`. **Delete All** also empties the saved file. The Find Game list is kept in memory only.
 
 ## Fail-open mapping behavior
 
